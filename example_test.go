@@ -1,6 +1,8 @@
 package logging_test
 
 import (
+	"context"
+	"log/slog"
 	"os"
 	"time"
 
@@ -39,6 +41,19 @@ func ExampleEntry_Mask() {
 		Mask("cardNumber", logging.CreditCard).
 		Log()
 	// Output: {"timestamp":"2026-01-11T00:15:34.123Z","level":"INFO","trace_id":"b7f5e0b3b78b4b0fb2df8e5a9c3e22e5","event":"payment_processed","message":"Payment processed","payload":"{\"amount\":100,\"cardNumber\":\"1111 99 **** ** 3333\"}"}
+}
+
+// Bridging the standard log/slog API onto this library's JSON format.
+func ExampleNewSlogHandler() {
+	h := logging.NewSlogHandler(fixedLogger(), nil)
+
+	// A fixed correlation ID in the context keeps trace_id deterministic; a zero
+	// record time falls back to the logger clock.
+	ctx := logging.WithCorrelationID(context.Background(), "b7f5e0b3b78b4b0fb2df8e5a9c3e22e5")
+	r := slog.NewRecord(time.Time{}, slog.LevelInfo, "User created", 0)
+	r.Add("event", "user_created", "user_id", "u-123")
+	_ = h.Handle(ctx, r)
+	// Output: {"timestamp":"2026-01-11T00:15:34.123Z","level":"INFO","trace_id":"b7f5e0b3b78b4b0fb2df8e5a9c3e22e5","event":"user_created","message":"User created","extra":{"user_id":"u-123"}}
 }
 
 // Attaching integration context.

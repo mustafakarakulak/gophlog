@@ -6,11 +6,11 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
-// Entry is a fluent builder for a single log record. It mirrors the .NET
-// LogContext API. Build it with one of the Logger level methods, chain the
-// With* methods, and finish with Log().
+// Entry is a fluent builder for a single log record. Build it with one of the
+// Logger level methods, chain the With* methods, and finish with Log().
 //
 // An Entry is not safe for concurrent use; build and Log it from one goroutine.
 type Entry struct {
@@ -19,6 +19,7 @@ type Entry struct {
 	level   Level
 	message string
 	event   string
+	ts      time.Time // optional timestamp override; zero means use the logger clock
 
 	payload        any
 	maskStrategies map[string]MaskingStrategy
@@ -120,15 +121,20 @@ func (e *Entry) WithCategory(category string) *Entry {
 }
 
 // WithError attaches error type, message and a captured stack trace.
+//
+// The stack is only captured when the entry's level would actually be emitted,
+// so a disabled-level error log never pays for the (relatively expensive) trace.
 func (e *Entry) WithError(err error) *Entry {
 	if err == nil {
 		return e
 	}
 	e.errorType = errorTypeName(err)
 	e.errorMessage = err.Error()
-	// skip=2 → start the trace at the caller of WithError (the user's code),
-	// not at runtime internals.
-	e.stackTrace = captureStack(2)
+	if e.logger.Enabled(e.level) {
+		// skip=2 → start the trace at the caller of WithError (the user's code),
+		// not at runtime internals.
+		e.stackTrace = captureStack(2)
+	}
 	return e
 }
 
@@ -189,8 +195,7 @@ func (e *Entry) WithHTTP(method, path string) *Entry {
 	return e
 }
 
-// WithHTTPResult sets HTTP method, path, status and duration in one call,
-// mirroring the .NET WithHttp(method, path, status, durationMs) overload.
+// WithHTTPResult sets HTTP method, path, status and duration in one call.
 func (e *Entry) WithHTTPResult(method, path string, status int, durationMs float64) *Entry {
 	e.httpMethod = method
 	e.httpPath = path
@@ -261,7 +266,8 @@ func (e *Entry) WithJobInfo(name, schedule, runID string) *Entry {
 	return e
 }
 
-// WithWorkflow sets Temporal-style workflow identifiers.
+// WithWorkflow sets workflow identifiers (child workflow, run and parent
+// workflow IDs). Empty values are ignored.
 func (e *Entry) WithWorkflow(childWorkflowID, runID, parentWorkflowID string) *Entry {
 	if childWorkflowID != "" {
 		e.childWorkflowID = childWorkflowID
@@ -280,10 +286,10 @@ func (e *Entry) Log() {
 	e.logger.emit(e)
 }
 
-// errorTypeName returns a short, .NET-like type name for an error value.
-// Named/custom error types report their own type name (e.g. "ValidationError"),
-// while the standard library's anonymous wrappers (errors.New, fmt.Errorf,
-// errors.Join) report a plain "error" instead of their unexported internals.
+// errorTypeName returns a short type name for an error value. Named/custom error
+// types report their own type name (e.g. "ValidationError"), while the standard
+// library's anonymous wrappers (errors.New, fmt.Errorf, errors.Join) report a
+// plain "error" instead of their unexported internals.
 func errorTypeName(err error) string {
 	t := reflect.TypeOf(err)
 	for t != nil && t.Kind() == reflect.Ptr {

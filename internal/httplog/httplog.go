@@ -8,7 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
+	"sort"
 	"strings"
+
+	logging "github.com/mustafakarakulak/go-logging"
 )
 
 // CaptureBody reads at most max+1 bytes from body for logging while preserving
@@ -111,6 +115,82 @@ func CapBody(body string, max int) string {
 		return body
 	}
 	return body[:max] + "... [truncated]"
+}
+
+// MaskQueryValues masks, in place, every value of q whose key matches a
+// strategy (case-insensitive). Keys without a matching strategy are left
+// untouched. It is used to keep secrets (tokens, passwords) in query strings
+// from being logged in clear text.
+func MaskQueryValues(q url.Values, strategies map[string]logging.MaskingStrategy) {
+	if len(q) == 0 || len(strategies) == 0 {
+		return
+	}
+	lower := make(map[string]logging.MaskingStrategy, len(strategies))
+	for k, s := range strategies {
+		lower[strings.ToLower(k)] = s
+	}
+	for key, vals := range q {
+		if s, ok := lower[strings.ToLower(key)]; ok {
+			for i := range vals {
+				vals[i] = logging.MaskString(vals[i], s)
+			}
+		}
+	}
+}
+
+// MaskFormBody parses a application/x-www-form-urlencoded body, masks the values
+// whose keys match a strategy, and re-encodes it. The original body is returned
+// unchanged when it does not parse as a form. This closes the gap where masking
+// only covered JSON bodies.
+func MaskFormBody(body string, strategies map[string]logging.MaskingStrategy) (string, bool) {
+	values, err := url.ParseQuery(body)
+	if err != nil || len(values) == 0 {
+		return body, false
+	}
+	MaskQueryValues(values, strategies)
+	return values.Encode(), true
+}
+
+// RenderQuery renders url.Values as a sorted "k=v&k=v" string for log display.
+// Unlike url.Values.Encode it does not percent-escape values, so a masked value
+// stays readable (e.g. "token=********" rather than "token=%2A%2A..."). It is
+// for log output only, never for issuing a real request.
+func RenderQuery(q url.Values) string {
+	if len(q) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(q))
+	for k := range q {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	first := true
+	for _, k := range keys {
+		for _, v := range q[k] {
+			if !first {
+				b.WriteByte('&')
+			}
+			first = false
+			b.WriteString(k)
+			b.WriteByte('=')
+			b.WriteString(v)
+		}
+	}
+	return b.String()
+}
+
+// JoinQuery flattens url.Values into a single-valued map, joining repeated
+// values with a comma, for the structured query_params log field.
+func JoinQuery(q url.Values) map[string]string {
+	if len(q) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(q))
+	for k, v := range q {
+		out[k] = strings.Join(v, ",")
+	}
+	return out
 }
 
 // CollectExtra recursively searches decoded JSON for the named fields

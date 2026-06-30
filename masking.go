@@ -6,8 +6,8 @@ import (
 
 // MaskingStrategy defines how a sensitive value is partially or fully masked.
 //
-// The behaviour mirrors the .NET Odeal.Logging MaskHelper exactly, including
-// the implementation detail that "hidden" portions are capped at 8 asterisks.
+// For the fully hidden ("hideall") strategy the masked portion is capped at 8
+// asterisks so the output never reveals the secret's length.
 type MaskingStrategy string
 
 const (
@@ -99,7 +99,8 @@ func MaskString(value string, strategy MaskingStrategy) string {
 	}
 }
 
-// maskFixed mirrors the .NET MaskHelper.MaskString(value, visibleChars) helper.
+// maskFixed masks all but the last visibleChars runes of r. When visibleChars
+// is <= 0 the whole value is hidden, capped at 8 asterisks.
 func maskFixed(r []rune, visibleChars int) string {
 	n := len(r)
 	if n == 0 {
@@ -122,7 +123,8 @@ func maskFixed(r []rune, visibleChars int) string {
 	return strings.Repeat("*", n-visibleChars) + string(r[n-visibleChars:])
 }
 
-// maskCreditCard mirrors the .NET MaskHelper.MaskStringCreditCard helper.
+// maskCreditCard masks a card number, keeping the first 6 (BIN) and last 4
+// digits visible and regrouping the result for readability.
 func maskCreditCard(value string) string {
 	if value == "" {
 		return value
@@ -147,7 +149,7 @@ func maskCreditCard(value string) string {
 	middleMask := strings.Repeat("*", cn-10)
 	result := first6 + middleMask + last4
 
-	// The original always reformats here because cleaned length >= 10.
+	// cleaned length is > 10 here, so the result is always regrouped below.
 	rr := []rune(result)
 	rn := len(rr)
 	var b strings.Builder
@@ -185,8 +187,8 @@ func maskCreditCard(value string) string {
 }
 
 // maskScalar masks a scalar JSON value (string/number/bool). Non-scalar values
-// are returned unchanged. The result is always a string, matching .NET where
-// MaskHelper.Mask returns a string JSON element.
+// are returned unchanged. The masked result is always a string, so a masked
+// number is emitted as a JSON string rather than a number.
 func maskScalar(value any, strategy MaskingStrategy) any {
 	switch v := value.(type) {
 	case nil:

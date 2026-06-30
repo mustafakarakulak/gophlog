@@ -2,8 +2,7 @@ package logging
 
 // Level represents the severity of a log entry.
 //
-// Levels are serialized to JSON as upper-case strings (e.g. "INFO"),
-// mirroring the .NET Odeal.Logging LogLevel enum.
+// Levels are serialized to JSON as upper-case strings (e.g. "INFO").
 type Level string
 
 const (

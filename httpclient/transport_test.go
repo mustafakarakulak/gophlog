@@ -136,6 +136,113 @@ func TestTransportRedirectReplaysBody(t *testing.T) {
 	}
 }
 
+func TestTransportLogCurl(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	var logBuf, curlBuf bytes.Buffer
+	log := logging.New(logging.WithWriter(&logBuf))
+	client := NewClient(nil, Options{
+		Logger:         log,
+		LogRequestBody: true,
+		LogCurl:        true,
+		CurlWriter:     &curlBuf,
+	})
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/x", strings.NewReader(`{"a":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	curl := curlBuf.String()
+	if !strings.Contains(curl, "curl -X POST") {
+		t.Errorf("curl command missing method: %q", curl)
+	}
+	if !strings.Contains(curl, `--data '{"a":1}'`) {
+		t.Errorf("curl command missing body: %q", curl)
+	}
+}
+
+func TestTransportMasksFormBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	log := logging.New(logging.WithWriter(&buf))
+	client := NewClient(nil, Options{
+		Logger:              log,
+		LogRequestBody:      true,
+		MaskFieldStrategies: map[string]logging.MaskingStrategy{"password": logging.HideAll},
+	})
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/login", strings.NewReader("user=alice&password=hunter2"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	reqBody := parseLine(t, &buf)["request_body"].(string)
+	if strings.Contains(reqBody, "hunter2") {
+		t.Errorf("form password should be masked: %s", reqBody)
+	}
+}
+
+func TestTransportMasksURLQuery(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	log := logging.New(logging.WithWriter(&buf))
+	client := NewClient(nil, Options{
+		Logger:              log,
+		MaskFieldStrategies: map[string]logging.MaskingStrategy{"token": logging.HideAll},
+	})
+
+	resp, err := client.Get(srv.URL + "/x?token=supersecret&page=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	path := parseLine(t, &buf)["http_path"].(string)
+	if strings.Contains(path, "supersecret") {
+		t.Errorf("token should be masked in logged URL: %s", path)
+	}
+}
+
+func TestTransportErrorPath(t *testing.T) {
+	var buf bytes.Buffer
+	log := logging.New(logging.WithWriter(&buf))
+	// Point at a closed port so RoundTrip returns a transport error.
+	client := NewClient(nil, Options{Logger: log, LogRequestBody: true})
+
+	req, _ := http.NewRequest(http.MethodGet, "http://127.0.0.1:1/unreachable", nil)
+	_, err := client.Do(req)
+	if err == nil {
+		t.Fatal("expected a transport error")
+	}
+
+	m := parseLine(t, &buf)
+	if !strings.HasSuffix(m["event"].(string), "_exception") {
+		t.Errorf("error event should be suffixed _exception: %v", m["event"])
+	}
+	if m["error_message"] == nil {
+		t.Errorf("error_message should be set: %v", m)
+	}
+}
+
 func TestTransportExcludeURLs(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{}`))

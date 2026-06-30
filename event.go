@@ -4,13 +4,12 @@ import "encoding/json"
 
 // Event is the structured log record emitted as a single line of JSON.
 //
-// Field ordering and names mirror the .NET Odeal.Logging LogEvent. Optional
-// fields are omitted when empty so the output stays clean ("null-safe").
+// Optional fields are omitted when empty so the output stays clean
+// ("null-safe").
 //
 // Note: payload is serialized as a *stringified* JSON value (a JSON string
-// whose content is itself JSON), matching the .NET PayloadConverter. The
-// `extra` object, by contrast, is emitted as real nested JSON so it stays
-// searchable in OpenSearch.
+// whose content is itself JSON). The `extra` object, by contrast, is emitted as
+// real nested JSON so it stays searchable in OpenSearch.
 type Event struct {
 	Timestamp string  `json:"timestamp"`
 	Level     Level   `json:"level"`
@@ -74,7 +73,7 @@ func stringifyJSON(v any) string {
 }
 
 // MarshalJSON renders IntegrationInfo with request_body/response_body as
-// stringified JSON, matching the .NET PayloadConverter applied to those fields.
+// stringified JSON (a JSON string whose content is itself JSON).
 func (i IntegrationInfo) MarshalJSON() ([]byte, error) {
 	type alias struct {
 		Target             string            `json:"target,omitempty"`

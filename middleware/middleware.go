@@ -1,10 +1,9 @@
 // Package middleware provides net/http server middleware that automatically
 // logs every HTTP request/response using github.com/mustafakarakulak/go-logging.
 //
-// It is the Go equivalent of the .NET RequestLoggingMiddleware: it captures the
-// request/response bodies, duration, status, client IP, query parameters and
-// workflow headers, applies field masking, and emits a single structured log
-// line per request.
+// It captures the request/response bodies, duration, status, client IP, query
+// parameters and workflow headers, applies field masking, and emits a single
+// structured log line per request.
 package middleware
 
 import (
@@ -161,8 +160,8 @@ func handle(opts Options, next http.Handler, w http.ResponseWriter, r *http.Requ
 	}
 
 	extra := map[string]any{}
-	maskedReq := processBody(requestBody, opts, true, extra)
-	maskedResp := processBody(responseBody, opts, false, extra)
+	maskedReq := processBody(requestBody, r.Header.Get("Content-Type"), opts, true, extra)
+	maskedResp := processBody(responseBody, rec.Header().Get("Content-Type"), opts, false, extra)
 
 	if opts.ExtraProvider != nil {
 		for k, v := range opts.ExtraProvider(r) {
@@ -170,10 +169,19 @@ func handle(opts Options, next http.Handler, w http.ResponseWriter, r *http.Requ
 		}
 	}
 
+	// Mask sensitive query parameters (tokens, passwords) before they reach
+	// either the query_params field or the path component of the log message.
+	query := r.URL.Query()
+	httplog.MaskQueryValues(query, opts.MaskFieldStrategies)
+
 	method := r.Method
 	fullPath := r.URL.Path
 	if r.URL.RawQuery != "" {
-		fullPath += "?" + r.URL.RawQuery
+		if len(opts.MaskFieldStrategies) > 0 {
+			fullPath += "?" + httplog.RenderQuery(query)
+		} else {
+			fullPath += "?" + r.URL.RawQuery
+		}
 	}
 	msg := httplog.Message(method, fullPath, status, durationMs)
 
@@ -190,7 +198,7 @@ func handle(opts Options, next http.Handler, w http.ResponseWriter, r *http.Requ
 	if maskedResp != "" {
 		entry.WithResponseBody(maskedResp)
 	}
-	if qp := queryParams(r); len(qp) > 0 {
+	if qp := httplog.JoinQuery(query); len(qp) > 0 {
 		entry.WithQueryParams(qp)
 	}
 	if len(extra) > 0 {
@@ -206,14 +214,20 @@ const bodyTooLarge = "[body not logged: exceeds MaxBodySize]"
 
 // processBody masks the FULL body and extracts extra fields, then truncates the
 // masked result for logging. Masking happens before truncation so sensitive
-// fields can never leak through a truncated, unparseable body.
-func processBody(body string, opts Options, isRequest bool, extra map[string]any) string {
+// fields can never leak through a truncated, unparseable body. Form-urlencoded
+// bodies are masked too; any other non-JSON body is logged as-is.
+func processBody(body, contentType string, opts Options, isRequest bool, extra map[string]any) string {
 	if body == "" {
 		return ""
 	}
 	formatted := httplog.FormatJSON(body)
 	var decoded any
 	if err := json.Unmarshal([]byte(formatted), &decoded); err != nil {
+		if isFormContentType(contentType) {
+			if masked, ok := httplog.MaskFormBody(body, opts.MaskFieldStrategies); ok {
+				return httplog.CapBody(masked, opts.MaxBodySize)
+			}
+		}
 		return httplog.CapBody(formatted, opts.MaxBodySize) // not JSON; log as-is
 	}
 
@@ -319,14 +333,6 @@ func ClientIP(r *http.Request) string {
 	return addr
 }
 
-func queryParams(r *http.Request) map[string]string {
-	q := r.URL.Query()
-	if len(q) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(q))
-	for k, v := range q {
-		out[k] = strings.Join(v, ",")
-	}
-	return out
+func isFormContentType(contentType string) bool {
+	return strings.Contains(strings.ToLower(contentType), "application/x-www-form-urlencoded")
 }

@@ -77,6 +77,59 @@ func TestMiddlewareLogsRequest(t *testing.T) {
 	}
 }
 
+func TestMiddlewareMasksQueryParams(t *testing.T) {
+	var buf bytes.Buffer
+	log := logging.New(logging.WithWriter(&buf))
+	mw := New(Options{
+		Logger:              log,
+		MaskFieldStrategies: map[string]logging.MaskingStrategy{"token": logging.HideAll},
+	})
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/reset?token=supersecret&page=2", nil)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	m := parseLine(t, &buf)
+	qp := m["query_params"].(map[string]any)
+	if qp["token"] == "supersecret" {
+		t.Errorf("token query param should be masked: %v", qp["token"])
+	}
+	if qp["page"] != "2" {
+		t.Errorf("non-sensitive query param should be untouched: %v", qp["page"])
+	}
+	// The masked value must not leak through the path component either.
+	if strings.Contains(m["http_path"].(string), "supersecret") {
+		t.Errorf("token should be masked in http_path: %v", m["http_path"])
+	}
+}
+
+func TestMiddlewareMasksFormBody(t *testing.T) {
+	var buf bytes.Buffer
+	log := logging.New(logging.WithWriter(&buf))
+	mw := New(Options{
+		Logger:              log,
+		LogRequestBody:      true,
+		MaskFieldStrategies: map[string]logging.MaskingStrategy{"password": logging.HideAll},
+	})
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("username=alice&password=hunter2"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	m := parseLine(t, &buf)
+	reqBody := m["request_body"].(string)
+	if strings.Contains(reqBody, "hunter2") {
+		t.Errorf("password should be masked in form body: %s", reqBody)
+	}
+	if !strings.Contains(reqBody, "username=alice") {
+		t.Errorf("non-sensitive form field should be preserved: %s", reqBody)
+	}
+}
+
 func TestMiddlewareDoesNotTruncateHandlerBody(t *testing.T) {
 	var buf bytes.Buffer
 	log := logging.New(logging.WithWriter(&buf))
@@ -116,6 +169,61 @@ func TestMiddlewareExcludePaths(t *testing.T) {
 
 	if buf.Len() != 0 {
 		t.Errorf("excluded path should not be logged, got %q", buf.String())
+	}
+}
+
+func TestClientIPVariants(t *testing.T) {
+	mk := func(setup func(*http.Request)) string {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		setup(r)
+		return ClientIP(r)
+	}
+	if got := mk(func(r *http.Request) { r.Header.Set("X-Forwarded-For", "203.0.113.1, 10.0.0.1") }); got != "203.0.113.1" {
+		t.Errorf("XFF first hop = %q", got)
+	}
+	if got := mk(func(r *http.Request) { r.Header.Set("X-Real-IP", "198.51.100.7") }); got != "198.51.100.7" {
+		t.Errorf("X-Real-IP = %q", got)
+	}
+	if got := mk(func(r *http.Request) { r.RemoteAddr = "192.0.2.5:54321" }); got != "192.0.2.5" {
+		t.Errorf("RemoteAddr = %q", got)
+	}
+}
+
+func TestNewDefaultMiddleware(t *testing.T) {
+	var buf bytes.Buffer
+	logging.SetDefault(logging.New(logging.WithWriter(&buf)))
+	defer logging.SetDefault(logging.New())
+
+	handler := NewDefault()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/x", nil))
+
+	if buf.Len() == 0 {
+		t.Error("NewDefault middleware should log via the default logger")
+	}
+}
+
+func TestResponseRecorderFlushAndUnwrap(t *testing.T) {
+	var buf bytes.Buffer
+	log := logging.New(logging.WithWriter(&buf))
+	mw := New(Options{Logger: log})
+
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Flusher and ResponseController (via Unwrap) must work through the recorder.
+		if f, ok := w.(http.Flusher); ok {
+			w.Write([]byte("chunk"))
+			f.Flush()
+		} else {
+			t.Error("recorder should expose http.Flusher")
+		}
+		rc := http.NewResponseController(w)
+		_ = rc.Flush()
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/stream", nil))
+
+	if buf.Len() == 0 {
+		t.Error("request should still be logged")
 	}
 }
 

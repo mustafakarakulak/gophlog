@@ -3,7 +3,7 @@ package logging
 // IntegrationInfo holds metadata about an external integration call.
 //
 // RequestBody and ResponseBody are rendered as stringified JSON in the final
-// log output (matching the .NET PayloadConverter behaviour).
+// log output (a JSON string whose content is itself JSON).
 type IntegrationInfo struct {
 	Target             string            `json:"target,omitempty"`
 	Status             IntegrationStatus `json:"status,omitempty"`

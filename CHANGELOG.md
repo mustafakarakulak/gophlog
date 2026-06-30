@@ -8,6 +8,29 @@ kurallarına dayanır.
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-06-30
+
+### Eklendi
+
+- `log/slog` adaptörü: `NewSlogHandler` / `NewSlogLogger` ile standart `log/slog`
+  API'si bu kütüphanenin JSON formatına köprülenir (seviye eşleme, grup nesting,
+  `error` değerlerinin string'e dönüşü, `EventKey` ve `AddSource` opsiyonları).
+- `Logger.SetMinLevel`: minimum log seviyesini runtime'da, race-free değiştirme.
+
+### Değişti
+
+- Payload reflection yürümesine derinlik sınırı (`maxPayloadDepth`) eklendi;
+  döngüsel (cyclic) payload'lar artık stack overflow yerine sınırlanır.
+- Maskeleme artık query string parametrelerini ve `x-www-form-urlencoded`
+  gövdelerini de kapsıyor (middleware ve httpclient).
+- `emit` artık `sync.Pool`'lu buffer + `json.Encoder` kullanıyor; HTML escape
+  kapatıldı. Hata stack trace'i yalnızca ilgili seviye etkinse yakalanıyor.
+
+### Test
+
+- Test kapsamı %57.6'dan %87.6'ya çıkarıldı; `internal/httplog`, context
+  yardımcıları, builder'lar, options ve slog iç fonksiyonları için testler eklendi.
+
 ## [0.0.1] - 2026-06-29
 
 İlk genel sürüm.
@@ -28,5 +51,6 @@ kurallarına dayanır.
   maskeleme, URL filtreleme, exception loglama, correlation propagation, curl.
 - Kubernetes pod metadata desteği (statik veya env'den).
 
-[Unreleased]: https://github.com/mustafakarakulak/go-logging/compare/v0.0.1...HEAD
+[Unreleased]: https://github.com/mustafakarakulak/go-logging/compare/v0.0.2...HEAD
+[0.0.2]: https://github.com/mustafakarakulak/go-logging/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/mustafakarakulak/go-logging/releases/tag/v0.0.1

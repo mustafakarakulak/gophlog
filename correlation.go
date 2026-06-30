@@ -10,7 +10,8 @@ import (
 // (trace_id) across services.
 const CorrelationHeader = "X-Correlation-ID"
 
-// Workflow propagation headers (Temporal-style), mirrored from the .NET package.
+// Workflow propagation headers used to carry workflow identifiers across HTTP
+// calls.
 const (
 	HeaderChildWorkflowID  = "X-Child-Workflow-Id"
 	HeaderRunID            = "X-Run-Id"
@@ -32,8 +33,8 @@ const (
 	ctxKeyParentWorkflowID
 )
 
-// NewCorrelationID returns a new random 32-character hex correlation ID,
-// matching the .NET Guid.ToString("N") format length.
+// NewCorrelationID returns a new random 32-character hex correlation ID
+// (128 bits of entropy, rendered without dashes).
 func NewCorrelationID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -91,8 +92,8 @@ func WithSessionID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, ctxKeySessionID, id)
 }
 
-// WithWorkflow stores Temporal-style workflow identifiers in the context.
-// Empty values are ignored.
+// WithWorkflow stores workflow identifiers in the context. Empty values are
+// ignored.
 func WithWorkflow(ctx context.Context, childWorkflowID, runID, parentWorkflowID string) context.Context {
 	if childWorkflowID != "" {
 		ctx = context.WithValue(ctx, ctxKeyChildWorkflowID, childWorkflowID)

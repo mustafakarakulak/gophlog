@@ -1,19 +1,21 @@
 package logging
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // timestampLayout is the ISO-8601 UTC layout with millisecond precision and a
-// trailing Z, matching the .NET DateTimeIso8601Converter.
+// trailing Z (e.g. 2006-01-02T15:04:05.000Z).
 const timestampLayout = "2006-01-02T15:04:05.000Z"
 
-// defaultStackTraceLimit caps stack traces, mirroring the .NET 3000-char limit.
+// defaultStackTraceLimit caps captured stack traces at 3000 characters.
 const defaultStackTraceLimit = 3000
 
 // TraceExtractor pulls distributed-tracing identifiers from a context. It lets
@@ -28,12 +30,20 @@ type TraceExtractor func(ctx context.Context) (traceID, spanID string)
 type Logger struct {
 	mu         sync.Mutex
 	w          io.Writer
-	minLevel   Level
+	minLevel   atomic.Int32 // stores the minimum level's severity
 	trace      TraceExtractor
 	kube       *KubernetesInfo
 	stackLimit int
 	now        func() time.Time
 }
+
+// bufPool recycles the byte buffers used to render each log line, so steady-state
+// logging avoids a fresh allocation per entry.
+var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+// maxPooledBuffer bounds the capacity of buffers returned to bufPool, so a single
+// oversized log line cannot pin a large buffer in the pool indefinitely.
+const maxPooledBuffer = 64 * 1024
 
 // Option configures a Logger.
 type Option func(*Logger)
@@ -42,7 +52,9 @@ type Option func(*Logger)
 func WithWriter(w io.Writer) Option { return func(l *Logger) { l.w = w } }
 
 // WithMinLevel drops entries whose level is below min (default TRACE).
-func WithMinLevel(min Level) Option { return func(l *Logger) { l.minLevel = min } }
+func WithMinLevel(min Level) Option {
+	return func(l *Logger) { l.minLevel.Store(int32(min.severity())) }
+}
 
 // WithTraceExtractor sets a function that resolves trace_id/span_id from the
 // context (e.g. an OpenTelemetry adapter).
@@ -77,10 +89,10 @@ func WithClock(now func() time.Time) Option { return func(l *Logger) { l.now = n
 func New(opts ...Option) *Logger {
 	l := &Logger{
 		w:          os.Stdout,
-		minLevel:   TRACE,
 		stackLimit: defaultStackTraceLimit,
 		now:        time.Now,
 	}
+	l.minLevel.Store(int32(TRACE.severity()))
 	for _, opt := range opts {
 		opt(l)
 	}
@@ -89,7 +101,13 @@ func New(opts ...Option) *Logger {
 
 // Enabled reports whether the given level would be emitted.
 func (l *Logger) Enabled(level Level) bool {
-	return level.severity() >= l.minLevel.severity()
+	return level.severity() >= int(l.minLevel.Load())
+}
+
+// SetMinLevel changes the minimum level at runtime. It is safe to call
+// concurrently with logging.
+func (l *Logger) SetMinLevel(min Level) {
+	l.minLevel.Store(int32(min.severity()))
 }
 
 // --- Fluent entry points ---------------------------------------------------
@@ -126,11 +144,22 @@ func (l *Logger) emit(e *Entry) {
 	}
 	event := l.build(e)
 
-	buf, err := json.Marshal(event)
-	if err != nil {
+	buf := bufPool.Get().(*bytes.Buffer)
+	defer func() {
+		if buf.Cap() <= maxPooledBuffer {
+			buf.Reset()
+			bufPool.Put(buf)
+		}
+	}()
+
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false) // log payloads are machine-read; keep <,>,& literal
+	if err := enc.Encode(event); err != nil {
 		// Fall back to a minimal record so a bad payload/extra value never
-		// silently drops the log line entirely.
-		buf, err = json.Marshal(&Event{
+		// silently drops the log line entirely. Encode already wrote a partial
+		// object, so reset before re-encoding.
+		buf.Reset()
+		if encErr := enc.Encode(&Event{
 			Timestamp:    event.Timestamp,
 			Level:        event.Level,
 			TraceID:      event.TraceID,
@@ -138,17 +167,14 @@ func (l *Logger) emit(e *Entry) {
 			Message:      event.Message,
 			ErrorType:    "LogSerializationError",
 			ErrorMessage: err.Error(),
-		})
-		if err != nil {
+		}); encErr != nil {
 			return
 		}
 	}
 
-	buf = append(buf, '\n')
-
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.w.Write(buf)
+	l.w.Write(buf.Bytes())
+	l.mu.Unlock()
 }
 
 // build assembles the final Event, resolving trace context and rendering the
@@ -170,8 +196,13 @@ func (l *Logger) build(e *Entry) *Event {
 		traceID = NewCorrelationID()
 	}
 
+	ts := l.now()
+	if !e.ts.IsZero() {
+		ts = e.ts
+	}
+
 	ev := &Event{
-		Timestamp: l.now().UTC().Format(timestampLayout),
+		Timestamp: ts.UTC().Format(timestampLayout),
 		Level:     e.level,
 		LogType:   e.logType,
 		Category:  e.category,

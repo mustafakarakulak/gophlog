@@ -1,9 +1,9 @@
 // Package httpclient provides an http.RoundTripper that automatically logs
 // outbound HTTP requests/responses using github.com/mustafakarakulak/go-logging.
 //
-// It is the Go equivalent of the .NET HttpClientLoggingHandler: it captures
-// request/response bodies, duration and status, applies field masking, logs
-// failures (including timeouts) and propagates the correlation ID downstream.
+// It captures request/response bodies, duration and status, applies field
+// masking, logs failures (including timeouts) and propagates the correlation ID
+// downstream.
 package httpclient
 
 import (
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -109,17 +110,20 @@ func NewClient(client *http.Client, opts Options) *http.Client {
 
 // RoundTrip implements http.RoundTripper.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	url := ""
+	rawURL := ""
 	if req.URL != nil {
-		url = req.URL.String()
+		rawURL = req.URL.String()
 	}
 
-	if httplog.ShouldExclude(url, t.opts.ExcludeURLs) || !httplog.ShouldInclude(url, t.opts.IncludeURLs) {
+	if httplog.ShouldExclude(rawURL, t.opts.ExcludeURLs) || !httplog.ShouldInclude(rawURL, t.opts.IncludeURLs) {
 		return t.Base.RoundTrip(req)
 	}
 
 	opts := t.opts
 	ctx := req.Context()
+
+	// Mask sensitive query parameters before the URL is logged.
+	url := maskedURL(req.URL, opts.MaskFieldStrategies)
 
 	// Per the http.RoundTripper contract we must not mutate the caller's
 	// request; operate on a clone instead (header changes + body capture).
@@ -154,9 +158,11 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.Base.RoundTrip(outReq)
 	durationMs := float64(time.Since(begin).Microseconds()) / 1000.0
 
+	reqContentType := outReq.Header.Get("Content-Type")
+
 	if err != nil {
 		extra := map[string]any{}
-		maskedReq := processBody(requestBody, opts, true, extra)
+		maskedReq := processBody(requestBody, reqContentType, opts, true, extra)
 		eventName := opts.EventName + "_exception"
 		msg := httplog.Message(method, url, 0, durationMs)
 		entry := opts.Logger.At(opts.ErrorLogLevel, msg, eventName).
@@ -191,8 +197,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	extra := map[string]any{}
-	maskedReq := processBody(requestBody, opts, true, extra)
-	maskedResp := processBody(responseBody, opts, false, extra)
+	maskedReq := processBody(requestBody, reqContentType, opts, true, extra)
+	maskedResp := processBody(responseBody, resp.Header.Get("Content-Type"), opts, false, extra)
 
 	msg := httplog.Message(method, url, status, durationMs)
 	entry := opts.Logger.At(level, msg, opts.EventName).
@@ -217,15 +223,37 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 // masking is never bypassed by a partial, unparseable body.
 const bodyTooLarge = "[body not logged: exceeds MaxBodySize]"
 
+// maskedURL returns u as a string with sensitive query parameters masked. The
+// original URL is never mutated.
+func maskedURL(u *url.URL, strategies map[string]logging.MaskingStrategy) string {
+	if u == nil {
+		return ""
+	}
+	if u.RawQuery == "" || len(strategies) == 0 {
+		return u.String()
+	}
+	q := u.Query()
+	httplog.MaskQueryValues(q, strategies)
+	clone := *u
+	clone.RawQuery = httplog.RenderQuery(q)
+	return clone.String()
+}
+
 // processBody masks the FULL body and extracts extra fields, then truncates the
-// masked result for logging (mask-before-truncate prevents leaks).
-func processBody(body string, opts Options, isRequest bool, extra map[string]any) string {
+// masked result for logging (mask-before-truncate prevents leaks). Form-urlencoded
+// bodies are masked too; any other non-JSON body is logged as-is.
+func processBody(body, contentType string, opts Options, isRequest bool, extra map[string]any) string {
 	if body == "" {
 		return ""
 	}
 	formatted := httplog.FormatJSON(body)
 	var decoded any
 	if err := json.Unmarshal([]byte(formatted), &decoded); err != nil {
+		if isFormContentType(contentType) {
+			if masked, ok := httplog.MaskFormBody(body, opts.MaskFieldStrategies); ok {
+				return httplog.CapBody(masked, opts.MaxBodySize)
+			}
+		}
 		return httplog.CapBody(formatted, opts.MaxBodySize)
 	}
 	if len(opts.LogExtraFields) > 0 {
@@ -243,6 +271,10 @@ func processBody(body string, opts Options, isRequest bool, extra map[string]any
 		return httplog.CapBody(formatted, opts.MaxBodySize)
 	}
 	return httplog.CapBody(string(out), opts.MaxBodySize)
+}
+
+func isFormContentType(contentType string) bool {
+	return strings.Contains(strings.ToLower(contentType), "application/x-www-form-urlencoded")
 }
 
 func buildCurl(req *http.Request, body string) string {

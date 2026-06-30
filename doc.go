@@ -1,6 +1,5 @@
 // Package logging is an enterprise-grade structured JSON logging library for
-// Go, designed for Kubernetes, FluentBit and OpenSearch — a feature-for-feature
-// port of the .NET Odeal.Logging package.
+// Go, designed for Kubernetes, FluentBit and OpenSearch.
 //
 // # Highlights
 //

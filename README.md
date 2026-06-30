@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/go-1.23%2B-00ADD8.svg)](go.mod)
 
-Kubernetes, FluentBit ve OpenSearch entegrasyonu için tasarlanmış, **enterprise-grade yapısal JSON loglama** kütüphanesi. .NET `Odeal.Logging` paketinin Go'ya birebir (feature-for-feature) port edilmiş halidir.
+Kubernetes, FluentBit ve OpenSearch entegrasyonu için tasarlanmış, **enterprise-grade yapısal JSON loglama** kütüphanesi.
 
 ## Özellikler
 
@@ -21,6 +21,8 @@ Kubernetes, FluentBit ve OpenSearch entegrasyonu için tasarlanmış, **enterpri
 - ✅ **Field Masking** — 8 strateji + `mask` / `logextra` struct tag'leri
 - ✅ **HTTP Middleware** — `net/http` istek/yanıt loglaması
 - ✅ **HTTP Client Transport** — giden çağrılar için `http.RoundTripper`
+- ✅ **log/slog Adaptörü** — standart `log/slog` API'si için `slog.Handler` köprüsü
+- ✅ **Dinamik Log Seviyesi** — `SetMinLevel` ile runtime'da, race-free değişim
 
 ## Kurulum
 
@@ -48,7 +50,7 @@ log.Info("Resource created successfully", "resource_created").
 {"timestamp":"2026-01-11T00:15:34.123Z","level":"INFO","trace_id":"b7f5e0b3...","event":"resource_created","message":"Resource created successfully","payload":"{\"id\":\"123\",\"name\":\"example\"}"}
 ```
 
-> **Not:** `payload` alanı .NET kütüphanesindeki gibi **stringified JSON** (string içinde JSON) olarak yazılır. `extra` alanı ise gerçek nested JSON objesi olarak yazılır; bu sayede OpenSearch'te aranabilir kalır.
+> **Not:** `payload` alanı **stringified JSON** (string içinde JSON) olarak yazılır. `extra` alanı ise gerçek nested JSON objesi olarak yazılır; bu sayede OpenSearch'te aranabilir kalır.
 
 ### Paket düzeyinde varsayılan logger
 
@@ -101,7 +103,7 @@ log.Info("Message", "event_name").
     WithQueueMessage("queue", "msgId", retry, ack).         // Queue (kısa)
     WithJob(&logging.JobInfo{...}).                         // Job (tam)
     WithJobInfo("name", "schedule", "runId").               // Job (kısa)
-    WithWorkflow("child", "run", "parent").      // Temporal workflow id'leri
+    WithWorkflow("child", "run", "parent").      // workflow id'leri
     WithExtra(map[string]any{...}).              // Extra alanlar (aranabilir)
     WithExtraField("key", value).                // Tek extra alan
     Mask("field", logging.CreditCard).           // Payload içinde field mask
@@ -130,7 +132,7 @@ log.Info("Record updated", "record_updated").
 
 ### 2. Struct Tag ile (`mask` / `logextra`)
 
-.NET'teki `[Masked]` ve `[LogExtra]` attribute'larının Go karşılığı struct tag'lerdir. `WithPayload` bir struct (veya pointer/slice/map) aldığında bu tag'ler **otomatik** işlenir:
+Hassas alanlar struct tag'leri ile işaretlenir. `WithPayload` bir struct (veya pointer/slice/map) aldığında `mask` ve `logextra` tag'leri **otomatik** işlenir:
 
 ```go
 type Request struct {
@@ -168,7 +170,7 @@ log.Info("Request processed", "request_processed").
 | İlk 2 + Son 2 | `logging.ShowFirst2AndLast2` | `12*******32` |
 | Kredi kartı | `logging.CreditCard` | `5101 52 **** ** 4582` |
 
-> Maskeleme davranışı .NET `MaskHelper` ile birebir aynıdır (gizlenen kısım 8 yıldızla sınırlanır dahil).
+> Tam gizleme (`hideall`) stratejisinde maskelenen kısım 8 yıldızla sınırlanır; böylece çıktı sırrın uzunluğunu ele vermez.
 
 ## HTTP Server Middleware
 
@@ -258,6 +260,32 @@ log := logging.New(logging.WithTraceExtractor(func(ctx context.Context) (traceID
 
 Context yardımcıları: `WithCorrelationID`, `WithSpanID`, `WithRequestID`, `WithTenantID`, `WithUserID`, `WithClientIP`, `WithSessionID`, `WithWorkflow`.
 
+## log/slog Entegrasyonu
+
+Standart `log/slog` API'si ile yazılmış kodu bu kütüphanenin JSON formatına köprülemek için bir `slog.Handler` adaptörü vardır. Mevcut `slog` tabanlı kodu değiştirmeden bu loglama altyapısına geçebilirsiniz.
+
+```go
+base := logging.New(logging.WithMinLevel(logging.INFO))
+logger := logging.NewSlogLogger(base, nil) // *slog.Logger
+slog.SetDefault(logger)
+
+slog.Info("user created",
+    "event", "user_created", // "event" alanına taşınır
+    "user_id", "u-123",
+    slog.Group("db", "rows", 5, "table", "users"),
+)
+```
+
+Davranış:
+
+- **Seviye eşleme:** slog seviyeleri altı seviyeye genişletilir (Debug→`DEBUG`, Info→`INFO`, Warn→`WARN`, Error→`ERROR`; `LevelError+4` ve üzeri → `FATAL`, `LevelDebug` altı → `TRACE`).
+- **Attribute'lar:** aranabilir `extra` objesine yazılır; `WithGroup`/`slog.Group` nested obje olarak korunur.
+- **Hatalar:** `error` değeri taşıyan attribute'lar `{}` yerine `.Error()` string'i olarak yazılır.
+- **`event` eşlemesi:** `EventKey` (varsayılan `"event"`) ile bir attribute `event` alanına taşınır; `SlogOptions{EventKey: ""}` ile kapatılır.
+- **Kaynak konumu:** `SlogOptions{AddSource: true}` ile çağıran `function`/`file`/`line` bilgisi `extra.source` altına eklenir (slog logger'ının `AddSource` ile oluşturulmuş olması gerekir).
+
+Adaptör resmî `testing/slogtest` paketini, formatın `timestamp` alanını her zaman üretmesi (sıfır `Record.Time` kuralı) dışında geçer.
+
 ## JSON Çıktı Formatı
 
 ### Basit log
@@ -315,7 +343,7 @@ Context yardımcıları: `WithCorrelationID`, `WithSpanID`, `WithRequestID`, `Wi
 | `payload` | string? | Stringified JSON payload |
 | `error_type`, `error_message`, `stack_trace` | string? | Hata bilgileri (stack max 3000 char) |
 | `integration`, `queue`, `job` | object? | Domain context |
-| `child_workflow_id`, `run_id`, `parent_workflow_id` | string? | Temporal workflow id'leri |
+| `child_workflow_id`, `run_id`, `parent_workflow_id` | string? | workflow id'leri |
 | `extra` | object? | Aranabilir ekstra alanlar |
 | `kubernetes` | object? | Kubernetes metadata |
 

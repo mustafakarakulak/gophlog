@@ -60,13 +60,17 @@ var (
 	jsonMarshalerTyp = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
 )
 
+// maxPayloadDepth bounds the reflection walk so a cyclic value (a pointer or
+// slice that references itself) cannot recurse forever and overflow the stack.
+const maxPayloadDepth = 64
+
 // processPayload normalises an arbitrary value into JSON-ready data while
 // honouring `mask:"strategy"` and `logextra:"true"` struct tags.
 //
 //   - mask tags partially/fully mask the field value in place.
 //   - logextra tags MOVE the field out of the payload and into the returned
 //     extra map (keyed by the field's JSON name), making it a first-class,
-//     searchable field. This matches the documented Odeal.Logging behaviour.
+//     searchable field rather than part of the stringified payload.
 //
 // The returned extra map is nil when no logextra fields were found.
 func processPayload(v any) (payload any, extra map[string]any) {
@@ -74,14 +78,17 @@ func processPayload(v any) (payload any, extra map[string]any) {
 		return nil, nil
 	}
 	extra = map[string]any{}
-	out := processValue(reflect.ValueOf(v), extra)
+	out := processValue(reflect.ValueOf(v), extra, 0)
 	if len(extra) == 0 {
 		extra = nil
 	}
 	return out, extra
 }
 
-func processValue(rv reflect.Value, extra map[string]any) any {
+func processValue(rv reflect.Value, extra map[string]any, depth int) any {
+	if depth > maxPayloadDepth {
+		return "[max depth exceeded]"
+	}
 	if !rv.IsValid() {
 		return nil
 	}
@@ -103,7 +110,7 @@ func processValue(rv reflect.Value, extra map[string]any) any {
 
 	switch rv.Kind() {
 	case reflect.Struct:
-		return processStruct(rv, extra)
+		return processStruct(rv, extra, depth)
 	case reflect.Slice, reflect.Array:
 		if rv.Kind() == reflect.Slice && rv.IsNil() {
 			return nil
@@ -116,8 +123,8 @@ func processValue(rv reflect.Value, extra map[string]any) any {
 		arr := make([]any, n)
 		for i := 0; i < n; i++ {
 			// Per-element logextra is discarded to avoid key collisions across
-			// array items (mirrors the .NET array handling).
-			arr[i] = processValue(rv.Index(i), map[string]any{})
+			// array items.
+			arr[i] = processValue(rv.Index(i), map[string]any{}, depth+1)
 		}
 		return arr
 	case reflect.Map:
@@ -128,7 +135,7 @@ func processValue(rv reflect.Value, extra map[string]any) any {
 		iter := rv.MapRange()
 		for iter.Next() {
 			key := scalarToString(iter.Key().Interface())
-			out[key] = processValue(iter.Value(), map[string]any{})
+			out[key] = processValue(iter.Value(), map[string]any{}, depth+1)
 		}
 		return out
 	default:
@@ -136,7 +143,7 @@ func processValue(rv reflect.Value, extra map[string]any) any {
 	}
 }
 
-func processStruct(rv reflect.Value, extra map[string]any) any {
+func processStruct(rv reflect.Value, extra map[string]any, depth int) any {
 	t := rv.Type()
 	out := make(map[string]any, t.NumField())
 
@@ -150,7 +157,7 @@ func processStruct(rv reflect.Value, extra map[string]any) any {
 		}
 
 		fieldVal := rv.Field(i)
-		processed := processValue(fieldVal, extra)
+		processed := processValue(fieldVal, extra, depth+1)
 
 		// Apply masking if requested.
 		if maskTag := field.Tag.Get("mask"); maskTag != "" {
