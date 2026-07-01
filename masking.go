@@ -123,14 +123,18 @@ func maskFixed(r []rune, visibleChars int) string {
 	return strings.Repeat("*", n-visibleChars) + string(r[n-visibleChars:])
 }
 
+// creditCardCleaner strips common card-number separators. It is built once
+// because strings.NewReplacer constructs an internal lookup structure that is
+// expensive to allocate on every call.
+var creditCardCleaner = strings.NewReplacer(" ", "", "-", "", "_", "")
+
 // maskCreditCard masks a card number, keeping the first 6 (BIN) and last 4
 // digits visible and regrouping the result for readability.
 func maskCreditCard(value string) string {
 	if value == "" {
 		return value
 	}
-	replacer := strings.NewReplacer(" ", "", "-", "", "_", "")
-	cleaned := replacer.Replace(value)
+	cleaned := creditCardCleaner.Replace(value)
 	cr := []rune(cleaned)
 	cn := len(cr)
 

@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -122,9 +123,9 @@ func processValue(rv reflect.Value, extra map[string]any, depth int) any {
 		n := rv.Len()
 		arr := make([]any, n)
 		for i := 0; i < n; i++ {
-			// Per-element logextra is discarded to avoid key collisions across
-			// array items.
-			arr[i] = processValue(rv.Index(i), map[string]any{}, depth+1)
+			// Per-element logextra is discarded (nil extra) to avoid key
+			// collisions across array items.
+			arr[i] = processValue(rv.Index(i), nil, depth+1)
 		}
 		return arr
 	case reflect.Map:
@@ -135,7 +136,7 @@ func processValue(rv reflect.Value, extra map[string]any, depth int) any {
 		iter := rv.MapRange()
 		for iter.Next() {
 			key := scalarToString(iter.Key().Interface())
-			out[key] = processValue(iter.Value(), map[string]any{}, depth+1)
+			out[key] = processValue(iter.Value(), nil, depth+1)
 		}
 		return out
 	default:
@@ -143,36 +144,66 @@ func processValue(rv reflect.Value, extra map[string]any, depth int) any {
 	}
 }
 
-func processStruct(rv reflect.Value, extra map[string]any, depth int) any {
-	t := rv.Type()
-	out := make(map[string]any, t.NumField())
+// fieldPlan is the precomputed handling for one struct field, cached per type so
+// tags are parsed once rather than on every log call.
+type fieldPlan struct {
+	index     int
+	name      string
+	maskStrat MaskingStrategy
+	hasMask   bool
+	logextra  bool
+	anonymous bool
+}
 
+var fieldPlanCache sync.Map // reflect.Type -> []fieldPlan
+
+// structPlan returns the cached field plan for t, computing it on first use.
+func structPlan(t reflect.Type) []fieldPlan {
+	if v, ok := fieldPlanCache.Load(t); ok {
+		return v.([]fieldPlan)
+	}
+	plans := make([]fieldPlan, 0, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
-
-		// Recurse anonymous (embedded) structs so their fields are promoted.
 		name, ok := jsonFieldName(field)
 		if !ok {
 			continue
 		}
-
-		fieldVal := rv.Field(i)
-		processed := processValue(fieldVal, extra, depth+1)
-
-		// Apply masking if requested.
+		fp := fieldPlan{index: i, name: name, anonymous: field.Anonymous}
 		if maskTag := field.Tag.Get("mask"); maskTag != "" {
 			if strategy, ok := parseStrategy(maskTag); ok {
-				processed = maskScalarOrRecurse(processed, strategy, map[string]MaskingStrategy{})
+				fp.maskStrat = strategy
+				fp.hasMask = true
 			}
 		}
+		fp.logextra = isTrueTag(field.Tag.Get("logextra"))
+		plans = append(plans, fp)
+	}
+	fieldPlanCache.Store(t, plans)
+	return plans
+}
 
-		// logextra moves the field into the extra map.
-		if isTrueTag(field.Tag.Get("logextra")) {
-			extra[name] = processed
+func processStruct(rv reflect.Value, extra map[string]any, depth int) any {
+	plans := structPlan(rv.Type())
+	out := make(map[string]any, len(plans))
+
+	for _, fp := range plans {
+		processed := processValue(rv.Field(fp.index), extra, depth+1)
+
+		if fp.hasMask {
+			processed = maskScalarOrRecurse(processed, fp.maskStrat, nil)
+		}
+
+		// logextra moves the field into the extra map. A nil extra (inside an
+		// array/map element) means the field is discarded instead.
+		if fp.logextra {
+			if extra != nil {
+				extra[fp.name] = processed
+			}
 			continue
 		}
 
-		if field.Anonymous {
+		if fp.anonymous {
 			// Promote embedded struct fields to the parent object.
 			if m, isMap := processed.(map[string]any); isMap {
 				for k, val := range m {
@@ -182,7 +213,7 @@ func processStruct(rv reflect.Value, extra map[string]any, depth int) any {
 			}
 		}
 
-		out[name] = processed
+		out[fp.name] = processed
 	}
 
 	return out

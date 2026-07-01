@@ -396,6 +396,20 @@ go test ./...
 go run ./examples
 ```
 
+## Performans
+
+Sıcak yollar için benchmark'lar `benchmark_test.go` içinde tanımlıdır. Kendi
+donanımınızda ölçmek için:
+
+```bash
+go test -bench . -benchmem -run '^$'
+```
+
+Sayılar donanıma ve Go sürümüne göre değişir; bu yüzden mutlak değerler yerine
+`allocs/op` metriğine bakmak daha anlamlıdır. Kapalı (filtrelenen) seviyedeki bir
+log çağrısı sıfır allocation yapacak şekilde tasarlanmıştır, dolayısıyla yüksek
+hacimli `Debug`/`Trace` loglaması pratikte bedavadır.
+
 ## Gereksinimler
 
 - Go 1.23+
