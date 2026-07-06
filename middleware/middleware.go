@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -55,6 +56,12 @@ type Options struct {
 
 	// ExtraProvider adds per-request extra fields derived from the request.
 	ExtraProvider func(*http.Request) map[string]string
+
+	// DisableForwardedHeaders makes the logged client IP come only from the
+	// connection's remote address, ignoring X-Forwarded-For / X-Real-IP. Set it
+	// when the service is NOT behind a trusted proxy: those headers are
+	// client-controlled and can otherwise be spoofed in audit logs.
+	DisableForwardedHeaders bool
 }
 
 func (o *Options) applyDefaults() {
@@ -114,7 +121,7 @@ func handle(opts Options, next http.Handler, w http.ResponseWriter, r *http.Requ
 		r.Header.Get(logging.HeaderRunID),
 		r.Header.Get(logging.HeaderParentWorkflowID),
 	)
-	if ip := ClientIP(r); ip != "" {
+	if ip := clientIP(r, !opts.DisableForwardedHeaders); ip != "" {
 		ctx = logging.WithClientIP(ctx, ip)
 	}
 	r = r.WithContext(ctx)
@@ -171,8 +178,12 @@ func handle(opts Options, next http.Handler, w http.ResponseWriter, r *http.Requ
 
 	// Mask sensitive query parameters (tokens, passwords) before they reach
 	// either the query_params field or the path component of the log message.
-	query := r.URL.Query()
-	httplog.MaskQueryValues(query, opts.MaskFieldStrategies)
+	// Parsing is skipped entirely when the request carries no query string.
+	var query url.Values
+	if r.URL.RawQuery != "" {
+		query = r.URL.Query()
+		httplog.MaskQueryValues(query, opts.MaskFieldStrategies)
+	}
 
 	method := r.Method
 	fullPath := r.URL.Path
@@ -216,19 +227,21 @@ const bodyTooLarge = "[body not logged: exceeds MaxBodySize]"
 // masked result for logging. Masking happens before truncation so sensitive
 // fields can never leak through a truncated, unparseable body. Form-urlencoded
 // bodies are masked too; any other non-JSON body is logged as-is.
+//
+// The body is decoded exactly once; the final Marshal both compacts and
+// re-serializes it, so no separate formatting pass is needed.
 func processBody(body, contentType string, opts Options, isRequest bool, extra map[string]any) string {
 	if body == "" {
 		return ""
 	}
-	formatted := httplog.FormatJSON(body)
 	var decoded any
-	if err := json.Unmarshal([]byte(formatted), &decoded); err != nil {
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
 		if isFormContentType(contentType) {
 			if masked, ok := httplog.MaskFormBody(body, opts.MaskFieldStrategies); ok {
 				return httplog.CapBody(masked, opts.MaxBodySize)
 			}
 		}
-		return httplog.CapBody(formatted, opts.MaxBodySize) // not JSON; log as-is
+		return httplog.CapBody(body, opts.MaxBodySize) // not JSON; log as-is
 	}
 
 	if len(opts.LogExtraFields) > 0 {
@@ -245,7 +258,7 @@ func processBody(body, contentType string, opts Options, isRequest bool, extra m
 
 	out, err := json.Marshal(decoded)
 	if err != nil {
-		return httplog.CapBody(formatted, opts.MaxBodySize)
+		return httplog.CapBody(body, opts.MaxBodySize)
 	}
 	return httplog.CapBody(string(out), opts.MaxBodySize)
 }
@@ -313,24 +326,31 @@ func (r *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 }
 
 // ClientIP extracts the client IP from X-Forwarded-For, X-Real-IP, or the
-// connection's remote address.
+// connection's remote address. Note that the forwarded headers are
+// client-controlled; when the service is not behind a trusted proxy, use the
+// middleware's DisableForwardedHeaders option instead of trusting them.
 func ClientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		parts := strings.Split(fwd, ",")
-		if len(parts) > 0 {
-			if ip := strings.TrimSpace(parts[0]); ip != "" {
+	return clientIP(r, true)
+}
+
+func clientIP(r *http.Request, trustForwarded bool) string {
+	if trustForwarded {
+		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+			first, _, _ := strings.Cut(fwd, ",")
+			if ip := strings.TrimSpace(first); ip != "" {
 				return ip
 			}
 		}
+		if real := r.Header.Get("X-Real-IP"); real != "" {
+			return real
+		}
 	}
-	if real := r.Header.Get("X-Real-IP"); real != "" {
-		return real
+	// RemoteAddr is host:port; SplitHostPort also unwraps bracketed IPv6
+	// addresses ("[::1]:8080" -> "::1").
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
 	}
-	addr := r.RemoteAddr
-	if i := strings.LastIndex(addr, ":"); i > 0 {
-		return addr[:i]
-	}
-	return addr
+	return r.RemoteAddr
 }
 
 func isFormContentType(contentType string) bool {

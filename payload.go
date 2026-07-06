@@ -61,6 +61,20 @@ var (
 	jsonMarshalerTyp = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
 )
 
+// opaqueTypeCache memoizes, per type, whether values are passed through as
+// opaque scalars. The Implements checks scan a type's method set, which is too
+// expensive to repeat on every node of every payload walk.
+var opaqueTypeCache sync.Map // reflect.Type -> bool
+
+func isOpaqueType(t reflect.Type) bool {
+	if v, ok := opaqueTypeCache.Load(t); ok {
+		return v.(bool)
+	}
+	opaque := t == timeType || t.Implements(jsonMarshalerTyp) || reflect.PtrTo(t).Implements(jsonMarshalerTyp)
+	opaqueTypeCache.Store(t, opaque)
+	return opaque
+}
+
 // maxPayloadDepth bounds the reflection walk so a cyclic value (a pointer or
 // slice that references itself) cannot recurse forever and overflow the stack.
 const maxPayloadDepth = 64
@@ -105,7 +119,7 @@ func processValue(rv reflect.Value, extra map[string]any, depth int) any {
 	t := rv.Type()
 
 	// Treat time.Time and custom json.Marshaler types as opaque scalars.
-	if t == timeType || t.Implements(jsonMarshalerTyp) || reflect.PtrTo(t).Implements(jsonMarshalerTyp) {
+	if isOpaqueType(t) {
 		return rv.Interface()
 	}
 
@@ -191,7 +205,7 @@ func processStruct(rv reflect.Value, extra map[string]any, depth int) any {
 		processed := processValue(rv.Field(fp.index), extra, depth+1)
 
 		if fp.hasMask {
-			processed = maskScalarOrRecurse(processed, fp.maskStrat, nil)
+			processed = maskScalarOrRecurse(processed, fp.maskStrat)
 		}
 
 		// logextra moves the field into the extra map. A nil extra (inside an

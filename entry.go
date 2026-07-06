@@ -17,6 +17,7 @@ type Entry struct {
 	logger  *Logger
 	ctx     context.Context
 	level   Level
+	sev     int // level.severity(), resolved once at creation
 	message string
 	event   string
 	ts      time.Time // optional timestamp override; zero means use the logger clock
@@ -60,7 +61,7 @@ type Entry struct {
 }
 
 func newEntry(l *Logger, level Level, message, event string) *Entry {
-	return &Entry{logger: l, level: level, message: message, event: event}
+	return &Entry{logger: l, level: level, sev: level.severity(), message: message, event: event}
 }
 
 // Ctx attaches a context so trace/correlation IDs and propagated metadata are
@@ -105,7 +106,9 @@ func (e *Entry) addMask(field string, strategy MaskingStrategy) {
 	if e.maskStrategies == nil {
 		e.maskStrategies = make(map[string]MaskingStrategy)
 	}
-	e.maskStrategies[field] = strategy
+	// Keys are lower-cased on insert so the case-insensitive lookup map never
+	// has to be rebuilt at emit time.
+	e.maskStrategies[strings.ToLower(field)] = strategy
 }
 
 // WithLogType sets the log type (app/audit/security).
@@ -130,7 +133,7 @@ func (e *Entry) WithError(err error) *Entry {
 	}
 	e.errorType = errorTypeName(err)
 	e.errorMessage = err.Error()
-	if e.logger.Enabled(e.level) {
+	if e.logger.enabledSeverity(e.sev) {
 		// skip=2 → start the trace at the caller of WithError (the user's code),
 		// not at runtime internals.
 		e.stackTrace = captureStack(2)
@@ -298,9 +301,15 @@ func errorTypeName(err error) string {
 	if t == nil {
 		return "error"
 	}
-	switch t.PkgPath() + "." + t.Name() {
-	case "errors.errorString", "fmt.wrapError", "fmt.wrapErrors", "errors.joinError":
-		return "error"
+	switch t.PkgPath() {
+	case "errors":
+		if n := t.Name(); n == "errorString" || n == "joinError" {
+			return "error"
+		}
+	case "fmt":
+		if n := t.Name(); n == "wrapError" || n == "wrapErrors" {
+			return "error"
+		}
 	}
 	name := t.Name()
 	if name == "" {

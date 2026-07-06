@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	logging "github.com/mustafakarakulak/go-logging"
 )
@@ -109,12 +110,17 @@ func FormatJSON(body string) string {
 	return string(out)
 }
 
-// CapBody truncates body to max bytes, appending a marker when truncated.
+// CapBody truncates body to max bytes, appending a marker when truncated. The
+// cut is backed up to a rune boundary so a multi-byte character is never split.
 func CapBody(body string, max int) string {
 	if max <= 0 || len(body) <= max {
 		return body
 	}
-	return body[:max] + "... [truncated]"
+	cut := max
+	for cut > 0 && !utf8.RuneStart(body[cut]) {
+		cut--
+	}
+	return body[:cut] + "... [truncated]"
 }
 
 // MaskQueryValues masks, in place, every value of q whose key matches a

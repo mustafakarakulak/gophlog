@@ -242,19 +242,21 @@ func maskedURL(u *url.URL, strategies map[string]logging.MaskingStrategy) string
 // processBody masks the FULL body and extracts extra fields, then truncates the
 // masked result for logging (mask-before-truncate prevents leaks). Form-urlencoded
 // bodies are masked too; any other non-JSON body is logged as-is.
+//
+// The body is decoded exactly once; the final Marshal both compacts and
+// re-serializes it, so no separate formatting pass is needed.
 func processBody(body, contentType string, opts Options, isRequest bool, extra map[string]any) string {
 	if body == "" {
 		return ""
 	}
-	formatted := httplog.FormatJSON(body)
 	var decoded any
-	if err := json.Unmarshal([]byte(formatted), &decoded); err != nil {
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
 		if isFormContentType(contentType) {
 			if masked, ok := httplog.MaskFormBody(body, opts.MaskFieldStrategies); ok {
 				return httplog.CapBody(masked, opts.MaxBodySize)
 			}
 		}
-		return httplog.CapBody(formatted, opts.MaxBodySize)
+		return httplog.CapBody(body, opts.MaxBodySize)
 	}
 	if len(opts.LogExtraFields) > 0 {
 		prefix := "response_"
@@ -268,7 +270,7 @@ func processBody(body, contentType string, opts Options, isRequest bool, extra m
 	}
 	out, err := json.Marshal(decoded)
 	if err != nil {
-		return httplog.CapBody(formatted, opts.MaxBodySize)
+		return httplog.CapBody(body, opts.MaxBodySize)
 	}
 	return httplog.CapBody(string(out), opts.MaxBodySize)
 }

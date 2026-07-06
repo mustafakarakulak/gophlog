@@ -88,6 +88,37 @@ func BenchmarkInfoWithMasking(b *testing.B) {
 	}
 }
 
+// BenchmarkInfoWithBoundFields exercises a child logger carrying typical
+// module-level bindings, to keep the bound-field fallback path visibly cheap.
+func BenchmarkInfoWithBoundFields(b *testing.B) {
+	log := benchLogger().With().
+		Category("payments").
+		Tenant("tn-1").
+		ExtraField("service", "billing").
+		Logger()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		log.Info("charged", "payment_charged").WithTraceID("t").Log()
+	}
+}
+
+// BenchmarkInfoWithContextFields exercises the context-resolution path the way
+// the middleware populates it (correlation ID, workflow, client IP, tenant).
+func BenchmarkInfoWithContextFields(b *testing.B) {
+	log := benchLogger()
+	ctx := WithCorrelationID(context.Background(), "c-1")
+	ctx = WithWorkflow(ctx, "wf-child", "run-1", "wf-parent")
+	ctx = WithClientIP(ctx, "10.0.0.1")
+	ctx = WithTenantID(ctx, "tn-1")
+	ctx = WithUserID(ctx, "u-1")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		log.Info("handled", "http_request").Ctx(ctx).Log()
+	}
+}
+
 func BenchmarkWithError(b *testing.B) {
 	log := benchLogger()
 	err := errors.New("something failed")

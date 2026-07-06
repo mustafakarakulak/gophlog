@@ -23,6 +23,7 @@ Kubernetes, FluentBit ve OpenSearch entegrasyonu için tasarlanmış, **enterpri
 - ✅ **HTTP Client Transport** — giden çağrılar için `http.RoundTripper`
 - ✅ **log/slog Adaptörü** — standart `log/slog` API'si için `slog.Handler` köprüsü
 - ✅ **Dinamik Log Seviyesi** — `SetMinLevel` ile runtime'da, race-free değişim
+- ✅ **Child Logger** — `With()` ile ortak alanları bir kez bağlayıp türetilmiş logger kullanımı
 
 ## Kurulum
 
@@ -110,6 +111,36 @@ log.Info("Message", "event_name").
     MaskMany(map[string]logging.MaskingStrategy{...}).
     Log()                                        // Kaydı yaz
 ```
+
+## Child Logger (`With`)
+
+Aynı alanları her log satırında tekrarlamak yerine `With()` ile bir kez
+bağlayıp türetilmiş bir logger kullanın. Modül/servis bazlı sabit bağlam için
+idealdir; istek bazlı alanlar için context propagation'ı kullanmaya devam edin.
+
+```go
+// Uygulama açılışında, modül başına bir kez:
+payLog := log.With().
+    Category("payments").
+    LogType(logging.LogTypeAudit).
+    ExtraField("service", "billing").
+    Mask("cardNumber", logging.CreditCard). // bu logger'daki tüm payload'lara uygulanır
+    Logger()
+
+// Sonrasında her yerde:
+payLog.Info("Payment charged", "payment_charged").WithPayload(p).Log()
+payLog.Error("Payment failed", "payment_failed").WithError(err).Log()
+```
+
+Bağlanabilen alanlar: `LogType`, `Category`, `Tenant`, `User`, `ClientIP`,
+`Session`, `RequestID`, `Integration`, `Queue`, `Job`, `Extra`/`ExtraField`
+ve `Mask`/`MaskMany`.
+
+Öncelik sırası: **entry'de açıkça verilen değer > context'ten gelen değer >
+bağlı (bound) değer**. Child logger, parent'ın writer'ını, minimum seviyesini
+ve diğer çekirdek yapılandırmasını paylaşır — `SetMinLevel` tüm aileyi
+etkiler. Child'dan child türetilebilir; `Logger()` çağrısından sonra builder'ı
+genişletmek önceden türetilen logger'ları etkilemez.
 
 ## Payload Masking
 

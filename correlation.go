@@ -20,18 +20,45 @@ const (
 
 type ctxKey int
 
-const (
-	ctxKeyCorrelationID ctxKey = iota
-	ctxKeySpanID
-	ctxKeyRequestID
-	ctxKeyTenantID
-	ctxKeyUserID
-	ctxKeyClientIP
-	ctxKeySessionID
-	ctxKeyChildWorkflowID
-	ctxKeyRunID
-	ctxKeyParentWorkflowID
-)
+const ctxKeyFields ctxKey = 0
+
+// ctxFields carries every propagated log field in a single context value, so
+// resolving all of them at emit time costs one context lookup instead of one
+// chain walk per field.
+type ctxFields struct {
+	correlationID    string
+	spanID           string
+	requestID        string
+	tenantID         string
+	userID           string
+	clientIP         string
+	sessionID        string
+	childWorkflowID  string
+	runID            string
+	parentWorkflowID string
+}
+
+// emptyCtxFields is returned when the context carries no fields, so callers can
+// read fields without a nil check.
+var emptyCtxFields ctxFields
+
+func fieldsFromCtx(ctx context.Context) *ctxFields {
+	if ctx == nil {
+		return &emptyCtxFields
+	}
+	if f, ok := ctx.Value(ctxKeyFields).(*ctxFields); ok {
+		return f
+	}
+	return &emptyCtxFields
+}
+
+// withField clones the current field set, applies set to the copy, and stores
+// it back, so contexts stay immutable while lookups stay a single Value call.
+func withField(ctx context.Context, set func(*ctxFields)) context.Context {
+	next := *fieldsFromCtx(ctx)
+	set(&next)
+	return context.WithValue(ctx, ctxKeyFields, &next)
+}
 
 // NewCorrelationID returns a new random 32-character hex correlation ID
 // (128 bits of entropy, rendered without dashes).
@@ -46,11 +73,11 @@ func NewCorrelationID() string {
 
 // WithCorrelationID stores the correlation ID (trace_id) in the context.
 func WithCorrelationID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, ctxKeyCorrelationID, id)
+	return withField(ctx, func(f *ctxFields) { f.correlationID = id })
 }
 
 // CorrelationID returns the correlation ID stored in the context, if any.
-func CorrelationID(ctx context.Context) string { return strFromCtx(ctx, ctxKeyCorrelationID) }
+func CorrelationID(ctx context.Context) string { return fieldsFromCtx(ctx).correlationID }
 
 // EnsureCorrelationID returns the context's correlation ID, generating and
 // storing a new one when absent.
@@ -64,55 +91,49 @@ func EnsureCorrelationID(ctx context.Context) (context.Context, string) {
 
 // WithSpanID stores a span ID in the context.
 func WithSpanID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, ctxKeySpanID, id)
+	return withField(ctx, func(f *ctxFields) { f.spanID = id })
 }
 
 // WithRequestID stores a request ID in the context.
 func WithRequestID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, ctxKeyRequestID, id)
+	return withField(ctx, func(f *ctxFields) { f.requestID = id })
 }
 
 // WithTenantID stores a tenant ID in the context.
 func WithTenantID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, ctxKeyTenantID, id)
+	return withField(ctx, func(f *ctxFields) { f.tenantID = id })
 }
 
 // WithUserID stores a user ID in the context.
 func WithUserID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, ctxKeyUserID, id)
+	return withField(ctx, func(f *ctxFields) { f.userID = id })
 }
 
 // WithClientIP stores a client IP in the context.
 func WithClientIP(ctx context.Context, ip string) context.Context {
-	return context.WithValue(ctx, ctxKeyClientIP, ip)
+	return withField(ctx, func(f *ctxFields) { f.clientIP = ip })
 }
 
 // WithSessionID stores a session ID in the context.
 func WithSessionID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, ctxKeySessionID, id)
+	return withField(ctx, func(f *ctxFields) { f.sessionID = id })
 }
 
 // WithWorkflow stores workflow identifiers in the context. Empty values are
 // ignored.
 func WithWorkflow(ctx context.Context, childWorkflowID, runID, parentWorkflowID string) context.Context {
-	if childWorkflowID != "" {
-		ctx = context.WithValue(ctx, ctxKeyChildWorkflowID, childWorkflowID)
+	if childWorkflowID == "" && runID == "" && parentWorkflowID == "" {
+		return ctx
 	}
-	if runID != "" {
-		ctx = context.WithValue(ctx, ctxKeyRunID, runID)
-	}
-	if parentWorkflowID != "" {
-		ctx = context.WithValue(ctx, ctxKeyParentWorkflowID, parentWorkflowID)
-	}
-	return ctx
-}
-
-func strFromCtx(ctx context.Context, key ctxKey) string {
-	if ctx == nil {
-		return ""
-	}
-	if v, ok := ctx.Value(key).(string); ok {
-		return v
-	}
-	return ""
+	return withField(ctx, func(f *ctxFields) {
+		if childWorkflowID != "" {
+			f.childWorkflowID = childWorkflowID
+		}
+		if runID != "" {
+			f.runID = runID
+		}
+		if parentWorkflowID != "" {
+			f.parentWorkflowID = parentWorkflowID
+		}
+	})
 }

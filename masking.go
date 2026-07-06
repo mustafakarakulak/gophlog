@@ -1,6 +1,9 @@
 package logging
 
 import (
+	"encoding/json"
+	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -148,51 +151,40 @@ func maskCreditCard(value string) string {
 		return first2 + middle + last2
 	}
 
-	first6 := string(cr[:6])
-	last4 := string(cr[cn-4:])
-	middleMask := strings.Repeat("*", cn-10)
-	result := first6 + middleMask + last4
-
-	// cleaned length is > 10 here, so the result is always regrouped below.
-	rr := []rune(result)
-	rn := len(rr)
+	// Masked layout: first 6 (BIN) + stars + last 4, regrouped as
+	// "dddd dd **** ... dddd". Positions 6..cn-4 are always stars, so the
+	// grouped output can be written in one pass without building the unmasked
+	// intermediate string.
 	var b strings.Builder
-	index := 0
-
-	if index < rn {
-		end := index + 4
-		if end > rn {
-			end = rn
-		}
-		b.WriteString(string(rr[index:end]))
-		index += 4
-	}
-	if index < rn {
-		end := index + 2
-		if end > rn {
-			end = rn
-		}
-		b.WriteString(" " + string(rr[index:end]))
-		index += 2
-	}
-	last4Start := rn - 4
-	for index < last4Start {
+	b.Grow(cn + cn/2)
+	b.WriteString(string(cr[:4]))
+	b.WriteByte(' ')
+	b.WriteString(string(cr[4:6]))
+	for index, last4Start := 6, cn-4; index < last4Start; {
 		segLen := 4
 		if last4Start-index < segLen {
 			segLen = last4Start - index
 		}
-		b.WriteString(" " + string(rr[index:index+segLen]))
+		b.WriteByte(' ')
+		for j := 0; j < segLen; j++ {
+			b.WriteByte('*')
+		}
 		index += segLen
 	}
-	if last4Start >= 0 && last4Start <= rn {
-		b.WriteString(" " + string(rr[last4Start:]))
-	}
+	b.WriteByte(' ')
+	b.WriteString(string(cr[cn-4:]))
 	return b.String()
 }
 
-// maskScalar masks a scalar JSON value (string/number/bool). Non-scalar values
-// are returned unchanged. The masked result is always a string, so a masked
-// number is emitted as a JSON string rather than a number.
+// maskScalar masks a scalar value. The masked result is always a string, so a
+// masked number is emitted as a JSON string rather than a number.
+//
+// Decoded-JSON containers (map[string]any / []any) are returned unchanged —
+// callers deep-mask them via maskScalarOrRecurse. Every other type is masked
+// fail-closed: named scalar types and non-standard numeric widths are rendered
+// via reflection, opaque values (json.Marshaler implementations such as
+// time.Time) are rendered to JSON first, and a value that cannot be rendered at
+// all is fully hidden rather than logged in the clear.
 func maskScalar(value any, strategy MaskingStrategy) any {
 	switch v := value.(type) {
 	case nil:
@@ -202,12 +194,50 @@ func maskScalar(value any, strategy MaskingStrategy) any {
 			return v
 		}
 		return MaskString(v, strategy)
-	case bool, float64, int, int64:
+	case bool, float64, float32, int, int64, json.Number:
 		return MaskString(scalarToString(v), strategy)
-	default:
-		// Objects / arrays are not scalar-maskable.
+	case map[string]any, []any:
 		return value
 	}
+
+	// Named scalar types and the remaining numeric widths.
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Bool:
+		return MaskString(strconv.FormatBool(rv.Bool()), strategy)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return MaskString(strconv.FormatInt(rv.Int(), 10), strategy)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return MaskString(strconv.FormatUint(rv.Uint(), 10), strategy)
+	case reflect.Float32, reflect.Float64:
+		return MaskString(strconv.FormatFloat(rv.Float(), 'f', -1, 64), strategy)
+	case reflect.String:
+		if rv.String() == "" {
+			return ""
+		}
+		return MaskString(rv.String(), strategy)
+	}
+
+	// Opaque values (json.Marshaler, time.Time, ...): mask the rendered JSON
+	// text, unquoting strings so quote characters never count as visible chars.
+	b, err := json.Marshal(value)
+	if err != nil {
+		return "********"
+	}
+	s := string(b)
+	if len(s) >= 2 && s[0] == '"' {
+		var u string
+		if json.Unmarshal(b, &u) == nil {
+			s = u
+		}
+	}
+	if s == "null" {
+		return nil
+	}
+	if s == "" {
+		return s
+	}
+	return MaskString(s, strategy)
 }
 
 // MaskJSON walks a decoded JSON value (map[string]any / []any / scalar) and
@@ -239,7 +269,7 @@ func applyMaskingLower(value any, lower map[string]MaskingStrategy) any {
 		out := make(map[string]any, len(v))
 		for key, val := range v {
 			if strategy, ok := lower[strings.ToLower(key)]; ok {
-				out[key] = maskScalarOrRecurse(val, strategy, lower)
+				out[key] = maskScalarOrRecurse(val, strategy)
 			} else if isContainer(val) {
 				out[key] = applyMaskingLower(val, lower)
 			} else {
@@ -258,13 +288,27 @@ func applyMaskingLower(value any, lower map[string]MaskingStrategy) any {
 	}
 }
 
-// maskScalarOrRecurse masks scalars but recurses into containers so a strategy
-// targeting a field that happens to hold an object still masks its leaves.
-func maskScalarOrRecurse(val any, strategy MaskingStrategy, lower map[string]MaskingStrategy) any {
-	if isContainer(val) {
-		return applyMaskingLower(val, lower)
+// maskScalarOrRecurse masks scalars; when the strategy targets a field that
+// holds an object or array, every scalar leaf underneath it is masked with the
+// same strategy, so an explicitly-targeted container can never leak values
+// through field names the strategy map does not know about.
+func maskScalarOrRecurse(val any, strategy MaskingStrategy) any {
+	switch v := val.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			out[key] = maskScalarOrRecurse(item, strategy)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = maskScalarOrRecurse(item, strategy)
+		}
+		return out
+	default:
+		return maskScalar(val, strategy)
 	}
-	return maskScalar(val, strategy)
 }
 
 func isContainer(v any) bool {

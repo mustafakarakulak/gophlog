@@ -8,6 +8,8 @@
 //   - Distributed-tracing friendly: trace_id/span_id resolved from context with
 //     a pluggable TraceExtractor (e.g. OpenTelemetry).
 //   - Field masking with eight strategies, plus `mask` / `logextra` struct tags.
+//   - Derived (child) loggers via With, binding shared fields once:
+//     log.With().Category("payments").Tenant("acme").Logger().
 //   - net/http server middleware and an http.RoundTripper for outbound calls,
 //     both with automatic request/response logging and masking.
 //
