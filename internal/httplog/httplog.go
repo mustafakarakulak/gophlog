@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -25,11 +26,20 @@ import (
 // from the original body via io.MultiReader, so large uploads/downloads are not
 // buffered in full. Closing the returned reader always closes the original
 // body, so callers can simply replace the body and forget the original.
+//
+// When the body fails mid-read, nothing is captured (a partial, unparseable
+// fragment could bypass masking) and the restored reader replays what was read
+// followed by the SAME error — the consumer must see the failure, not a clean
+// EOF over silently truncated data.
 func CaptureBody(body io.ReadCloser, max int) (captured []byte, restored io.ReadCloser, truncated bool) {
 	if max < 0 {
 		max = 0
 	}
-	buf, _ := io.ReadAll(io.LimitReader(body, int64(max)+1))
+	buf, err := io.ReadAll(io.LimitReader(body, int64(max)+1))
+	if err != nil {
+		r := io.MultiReader(bytes.NewReader(buf), errReader{err: err})
+		return nil, &readCloser{Reader: r, closer: body}, false
+	}
 	if len(buf) > max {
 		// More data may remain; stitch the peeked bytes back in front and keep
 		// the original open so the remainder can still be streamed and closed.
@@ -40,6 +50,12 @@ func CaptureBody(body io.ReadCloser, max int) (captured []byte, restored io.Read
 	_ = body.Close()
 	return buf, io.NopCloser(bytes.NewReader(buf)), false
 }
+
+// errReader replays a mid-stream read failure to the consumer of a captured
+// body.
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
 
 type readCloser struct {
 	io.Reader
@@ -92,7 +108,7 @@ func ShouldInclude(value string, patterns []string) bool {
 	return false
 }
 
-// FormatJSON compacts a JSON body for consistent logging. Non-JSON input is
+// FormatJSON compacts a JSON body for consistent gophlog. Non-JSON input is
 // returned unchanged.
 func FormatJSON(body string) string {
 	trimmed := strings.TrimSpace(body)
@@ -112,6 +128,8 @@ func FormatJSON(body string) string {
 
 // CapBody truncates body to max bytes, appending a marker when truncated. The
 // cut is backed up to a rune boundary so a multi-byte character is never split.
+// The marker is additive: output may exceed max by its length, the cap applies
+// to the retained content.
 func CapBody(body string, max int) string {
 	if max <= 0 || len(body) <= max {
 		return body
@@ -123,6 +141,21 @@ func CapBody(body string, max int) string {
 	return body[:cut] + "... [truncated]"
 }
 
+// LowerStrategies returns a copy of strategies keyed by lower-cased field name,
+// or nil for an empty input. The middleware and httpclient constructors call it
+// once — their options are static after construction — so the per-request
+// masking paths look keys up directly instead of rebuilding the map every time.
+func LowerStrategies(strategies map[string]gophlog.MaskingStrategy) map[string]gophlog.MaskingStrategy {
+	if len(strategies) == 0 {
+		return nil
+	}
+	lower := make(map[string]gophlog.MaskingStrategy, len(strategies))
+	for k, s := range strategies {
+		lower[strings.ToLower(k)] = s
+	}
+	return lower
+}
+
 // MaskQueryValues masks, in place, every value of q whose key matches a
 // strategy (case-insensitive). Keys without a matching strategy are left
 // untouched. It is used to keep secrets (tokens, passwords) in query strings
@@ -131,9 +164,14 @@ func MaskQueryValues(q url.Values, strategies map[string]gophlog.MaskingStrategy
 	if len(q) == 0 || len(strategies) == 0 {
 		return
 	}
-	lower := make(map[string]gophlog.MaskingStrategy, len(strategies))
-	for k, s := range strategies {
-		lower[strings.ToLower(k)] = s
+	MaskQueryValuesLower(q, LowerStrategies(strategies))
+}
+
+// MaskQueryValuesLower is MaskQueryValues taking a pre-lowered strategy map
+// (from LowerStrategies), so per-request callers skip rebuilding the lookup.
+func MaskQueryValuesLower(q url.Values, lower map[string]gophlog.MaskingStrategy) {
+	if len(q) == 0 || len(lower) == 0 {
+		return
 	}
 	for key, vals := range q {
 		if s, ok := lower[strings.ToLower(key)]; ok {
@@ -149,12 +187,78 @@ func MaskQueryValues(q url.Values, strategies map[string]gophlog.MaskingStrategy
 // unchanged when it does not parse as a form. This closes the gap where masking
 // only covered JSON bodies.
 func MaskFormBody(body string, strategies map[string]gophlog.MaskingStrategy) (string, bool) {
+	return MaskFormBodyLower(body, LowerStrategies(strategies))
+}
+
+// MaskFormBodyLower is MaskFormBody taking a pre-lowered strategy map.
+func MaskFormBodyLower(body string, lower map[string]gophlog.MaskingStrategy) (string, bool) {
 	values, err := url.ParseQuery(body)
 	if err != nil || len(values) == 0 {
 		return body, false
 	}
-	MaskQueryValues(values, strategies)
+	MaskQueryValuesLower(values, lower)
 	return values.Encode(), true
+}
+
+// MaskDecodedInPlace masks, in place, a value freshly produced by
+// json.Unmarshal (map[string]any / []any / scalar), using a pre-lowered
+// strategy map from LowerStrategies. It produces exactly what gophlog.MaskJSON
+// produces for that domain while skipping MaskJSON's defensive deep copy — the
+// middleware and httpclient own their decoded bodies outright, so nothing else
+// can observe the mutation. It must never run on data a caller may still hold.
+func MaskDecodedInPlace(decoded any, lower map[string]gophlog.MaskingStrategy) {
+	if len(lower) == 0 {
+		return
+	}
+	switch node := decoded.(type) {
+	case map[string]any:
+		for key, val := range node {
+			if strategy, ok := lower[strings.ToLower(key)]; ok {
+				node[key] = maskDecodedValue(val, strategy)
+			} else {
+				MaskDecodedInPlace(val, lower)
+			}
+		}
+	case []any:
+		for _, item := range node {
+			MaskDecodedInPlace(item, lower)
+		}
+	}
+}
+
+// maskDecodedValue masks one matched value. Containers are masked leaf-by-leaf
+// in place, mirroring gophlog's rule that an explicitly-targeted container may
+// never leak values through field names the strategy map does not know about.
+// json.Unmarshal only ever yields nil/bool/float64/string leaves (plus
+// json.Number under UseNumber); anything else is hidden outright, fail-closed.
+func maskDecodedValue(val any, strategy gophlog.MaskingStrategy) any {
+	switch v := val.(type) {
+	case map[string]any:
+		for key, item := range v {
+			v[key] = maskDecodedValue(item, strategy)
+		}
+		return v
+	case []any:
+		for i, item := range v {
+			v[i] = maskDecodedValue(item, strategy)
+		}
+		return v
+	case nil:
+		return nil
+	case string:
+		if v == "" {
+			return v
+		}
+		return gophlog.MaskString(v, strategy)
+	case bool:
+		return gophlog.MaskString(strconv.FormatBool(v), strategy)
+	case float64:
+		return gophlog.MaskString(strconv.FormatFloat(v, 'f', -1, 64), strategy)
+	case json.Number:
+		return gophlog.MaskString(v.String(), strategy)
+	default:
+		return "********"
+	}
 }
 
 // RenderQuery renders url.Values as a sorted "k=v&k=v" string for log display.
@@ -199,15 +303,31 @@ func JoinQuery(q url.Values) map[string]string {
 	return out
 }
 
-// CollectExtra recursively searches decoded JSON for the named fields
-// (case-insensitive) and copies their values into extra, keyed prefix+field.
-func CollectExtra(decoded any, fields []string, prefix string, extra map[string]any) {
+// LowerExtraFields builds the case-insensitive lookup CollectExtra derives from
+// its field list (lower-cased name -> original name), or nil for an empty list.
+// Constructors with a static field list build it once instead of per body.
+func LowerExtraFields(fields []string) map[string]string {
 	if len(fields) == 0 {
-		return
+		return nil
 	}
 	want := make(map[string]string, len(fields))
 	for _, f := range fields {
 		want[strings.ToLower(f)] = f
+	}
+	return want
+}
+
+// CollectExtra recursively searches decoded JSON for the named fields
+// (case-insensitive) and copies their values into extra, keyed prefix+field.
+func CollectExtra(decoded any, fields []string, prefix string, extra map[string]any) {
+	CollectExtraLower(decoded, LowerExtraFields(fields), prefix, extra)
+}
+
+// CollectExtraLower is CollectExtra taking a pre-built lookup from
+// LowerExtraFields.
+func CollectExtraLower(decoded any, want map[string]string, prefix string, extra map[string]any) {
+	if len(want) == 0 {
+		return
 	}
 	collect(decoded, want, prefix, extra)
 }

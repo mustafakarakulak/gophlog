@@ -6,12 +6,21 @@ import (
 	"runtime"
 )
 
+// defaultSlogEventKey is the attribute name mapped onto the "event" field when
+// SlogOptions does not override it.
+const defaultSlogEventKey = "event"
+
 // SlogOptions configures the slog.Handler adapter.
 type SlogOptions struct {
 	// EventKey names the attribute that, when present at the top level, sets the
-	// log "event" field instead of being placed in the extra object. Set it to ""
-	// to disable the mapping. Default: "event".
+	// log "event" field instead of being placed in the extra object.
+	// Empty means the default, "event"; use DisableEventKey to turn the mapping
+	// off.
 	EventKey string
+
+	// DisableEventKey turns off the event-attribute mapping entirely, so an
+	// "event" attribute stays in the extra object like any other.
+	DisableEventKey bool
 
 	// AddSource includes the caller's file/line/function (taken from the slog
 	// record) in the extra object under "source". The slog.Logger must be created
@@ -19,11 +28,21 @@ type SlogOptions struct {
 	AddSource bool
 }
 
+// eventKey resolves the attribute name mapped onto the "event" field, or "" when
+// the mapping is disabled. An options struct that simply does not set EventKey
+// keeps the default, so SlogOptions{AddSource: true} does not silently lose the
+// event mapping.
 func (o *SlogOptions) eventKey() string {
-	if o == nil {
-		return "event"
+	switch {
+	case o == nil:
+		return defaultSlogEventKey
+	case o.DisableEventKey:
+		return ""
+	case o.EventKey == "":
+		return defaultSlogEventKey
+	default:
+		return o.EventKey
 	}
-	return o.EventKey
 }
 
 // NewSlogHandler returns a slog.Handler that emits records through l, so code

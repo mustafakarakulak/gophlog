@@ -112,7 +112,7 @@ func TestSlogEventKey(t *testing.T) {
 func TestSlogEventKeyDisabled(t *testing.T) {
 	var buf bytes.Buffer
 	log := newTestLogger(&buf)
-	sl := slog.New(NewSlogHandler(log, &SlogOptions{EventKey: ""}))
+	sl := slog.New(NewSlogHandler(log, &SlogOptions{DisableEventKey: true}))
 
 	sl.Info("x", "event", "stays")
 
@@ -123,6 +123,21 @@ func TestSlogEventKeyDisabled(t *testing.T) {
 	extra := m["extra"].(map[string]any)
 	if extra["event"] != "stays" {
 		t.Errorf("event attr should remain in extra: %v", extra)
+	}
+}
+
+// TestSlogEventKeyDefaultSurvivesOtherOptions guards the zero-value footgun:
+// setting an unrelated option must not silently switch off the event mapping.
+func TestSlogEventKeyDefaultSurvivesOtherOptions(t *testing.T) {
+	var buf bytes.Buffer
+	log := newTestLogger(&buf)
+	sl := slog.New(NewSlogHandler(log, &SlogOptions{AddSource: true}))
+
+	sl.Info("x", "event", "mapped")
+
+	m := parseLine(t, &buf)
+	if m["event"] != "mapped" {
+		t.Errorf("event = %v; want the default mapping to still apply", m["event"])
 	}
 }
 

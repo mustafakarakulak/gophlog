@@ -14,10 +14,14 @@ import (
 type MaskingStrategy string
 
 const (
-	// MaskAll masks the entire value. Example: "12345678932" -> "********"
-	MaskAll MaskingStrategy = "hideall"
-	// HideAll is an alias for MaskAll.
+	// HideAll masks the entire value. Example: "12345678932" -> "********"
 	HideAll MaskingStrategy = "hideall"
+	// MaskAll is an alias for HideAll.
+	//
+	// Deprecated: use HideAll, which matches the underlying tag value
+	// ("hideall"). MaskAll is kept for compatibility and will not be removed,
+	// but new code should prefer HideAll.
+	MaskAll MaskingStrategy = "hideall"
 	// ShowFirst1 shows only the first character. Example: "12345678932" -> "1********"
 	ShowFirst1 MaskingStrategy = "showfirst1"
 	// ShowLast1 shows only the last character. Example: "12345678932" -> "**********2"
@@ -39,8 +43,8 @@ const (
 // Returns (strategy, true) when recognised.
 func parseStrategy(s string) (MaskingStrategy, bool) {
 	switch MaskingStrategy(strings.ToLower(strings.TrimSpace(s))) {
-	case MaskAll:
-		return MaskAll, true
+	case HideAll:
+		return HideAll, true
 	case ShowFirst1:
 		return ShowFirst1, true
 	case ShowLast1:
@@ -61,6 +65,11 @@ func parseStrategy(s string) (MaskingStrategy, bool) {
 }
 
 // MaskString applies a masking strategy to a raw string value.
+//
+// Every strategy is fail-closed: when the value is too short for the strategy to
+// hide anything meaningful, the whole value is hidden instead of leaking in the
+// clear. For example ShowLast2 hides a 2-character value entirely rather than
+// revealing it.
 func MaskString(value string, strategy MaskingStrategy) string {
 	if value == "" {
 		return value
@@ -95,33 +104,30 @@ func MaskString(value string, strategy MaskingStrategy) string {
 			return maskFixed(r, 0)
 		}
 		return string(r[:2]) + maskFixed(r[2:n-2], 0) + string(r[n-2:])
-	case MaskAll:
+	case HideAll:
 		fallthrough
 	default:
 		return maskFixed(r, 0)
 	}
 }
 
-// maskFixed masks all but the last visibleChars runes of r. When visibleChars
-// is <= 0 the whole value is hidden, capped at 8 asterisks.
+// maskFixed masks all but the last visibleChars runes of r.
+//
+// It is fail-closed: when visibleChars is <= 0, or the value is so short that
+// keeping visibleChars runes would leave nothing hidden, the whole value is
+// hidden — capped at 8 asterisks so the output never reveals the secret's
+// length.
 func maskFixed(r []rune, visibleChars int) string {
 	n := len(r)
 	if n == 0 {
 		return ""
 	}
-	if visibleChars <= 0 {
+	if visibleChars <= 0 || n <= visibleChars {
 		count := n
 		if count > 8 {
 			count = 8
 		}
 		return strings.Repeat("*", count)
-	}
-	if n <= visibleChars {
-		stars := n - 1
-		if stars < 1 {
-			stars = 1
-		}
-		return strings.Repeat("*", stars) + string(r[n-1])
 	}
 	return strings.Repeat("*", n-visibleChars) + string(r[n-visibleChars:])
 }
@@ -133,6 +139,10 @@ var creditCardCleaner = strings.NewReplacer(" ", "", "-", "", "_", "")
 
 // maskCreditCard masks a card number, keeping the first 6 (BIN) and last 4
 // digits visible and regrouping the result for readability.
+//
+// Real card numbers are 12–19 digits. A shorter value cannot be reduced to
+// "BIN + last four" without revealing most of it, so it is hidden entirely
+// (fail-closed) rather than partially leaked.
 func maskCreditCard(value string) string {
 	if value == "" {
 		return value
@@ -141,14 +151,8 @@ func maskCreditCard(value string) string {
 	cr := []rune(cleaned)
 	cn := len(cr)
 
-	if cn <= 10 {
-		if cn <= 4 {
-			return strings.Repeat("*", cn)
-		}
-		first2 := string(cr[:2])
-		last2 := string(cr[cn-2:])
-		middle := strings.Repeat("*", cn-4)
-		return first2 + middle + last2
+	if cn < 12 {
+		return maskFixed(cr, 0)
 	}
 
 	// Masked layout: first 6 (BIN) + stars + last 4, regrouped as
@@ -288,6 +292,29 @@ func applyMaskingLower(value any, lower map[string]MaskingStrategy) any {
 	}
 }
 
+// applyMaskingLowerInPlace is applyMaskingLower for trees the caller owns
+// exclusively — freshly built by processPayload, where every map/slice node was
+// just allocated and nothing else can observe it. Masked values are written
+// back in place, so an unmatched subtree costs nothing instead of a full
+// reallocation. It must never run on caller-supplied data; the exported
+// MaskJSON keeps the copying walk for exactly that reason.
+func applyMaskingLowerInPlace(value any, lower map[string]MaskingStrategy) {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, val := range v {
+			if strategy, ok := lower[strings.ToLower(key)]; ok {
+				v[key] = maskScalarOrRecurseInPlace(val, strategy)
+			} else if isContainer(val) {
+				applyMaskingLowerInPlace(val, lower)
+			}
+		}
+	case []any:
+		for _, item := range v {
+			applyMaskingLowerInPlace(item, lower)
+		}
+	}
+}
+
 // maskScalarOrRecurse masks scalars; when the strategy targets a field that
 // holds an object or array, every scalar leaf underneath it is masked with the
 // same strategy, so an explicitly-targeted container can never leak values
@@ -306,6 +333,26 @@ func maskScalarOrRecurse(val any, strategy MaskingStrategy) any {
 			out[i] = maskScalarOrRecurse(item, strategy)
 		}
 		return out
+	default:
+		return maskScalar(val, strategy)
+	}
+}
+
+// maskScalarOrRecurseInPlace is maskScalarOrRecurse for exclusively-owned
+// trees: targeted containers are masked leaf-by-leaf in place instead of being
+// copied node by node.
+func maskScalarOrRecurseInPlace(val any, strategy MaskingStrategy) any {
+	switch v := val.(type) {
+	case map[string]any:
+		for key, item := range v {
+			v[key] = maskScalarOrRecurseInPlace(item, strategy)
+		}
+		return v
+	case []any:
+		for i, item := range v {
+			v[i] = maskScalarOrRecurseInPlace(item, strategy)
+		}
+		return v
 	default:
 		return maskScalar(val, strategy)
 	}

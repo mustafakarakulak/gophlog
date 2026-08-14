@@ -1,4 +1,4 @@
-// Package logging is an enterprise-grade structured JSON logging library for
+// Package gophlog is an enterprise-grade structured JSON logging library for
 // Go, designed for Kubernetes, FluentBit and OpenSearch.
 //
 // # Highlights
@@ -7,11 +7,14 @@
 //   - Fluent builder API with rich context (HTTP, integration, queue, job, …).
 //   - Distributed-tracing friendly: trace_id/span_id resolved from context with
 //     a pluggable TraceExtractor (e.g. OpenTelemetry).
-//   - Field masking with eight strategies, plus `mask` / `logextra` struct tags.
+//   - Field masking with eight fail-closed strategies, plus `mask` / `logextra`
+//     struct tags.
 //   - Derived (child) loggers via With, binding shared fields once:
 //     log.With().Category("payments").Tenant("acme").Logger().
 //   - net/http server middleware and an http.RoundTripper for outbound calls,
 //     both with automatic request/response logging and masking.
+//   - Failures are never silent: WithOnError surfaces write and serialization
+//     errors instead of dropping log lines quietly.
 //
 // # Quick start
 //
@@ -29,5 +32,6 @@
 //	}
 //
 // `creditCard` is masked in place; `txnId` is moved into the searchable
-// `extra` object.
+// `extra` object. The payload renders exactly as encoding/json would render the
+// same value, including `omitempty` and embedded-struct handling.
 package gophlog

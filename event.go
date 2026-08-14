@@ -16,7 +16,7 @@ type Event struct {
 	LogType   LogType `json:"log_type,omitempty"`
 	Category  string  `json:"category,omitempty"`
 
-	TraceID   string `json:"trace_id"`
+	TraceID   string `json:"trace_id,omitempty"`
 	SpanID    string `json:"span_id,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 
@@ -38,7 +38,7 @@ type Event struct {
 
 	Event   string `json:"event,omitempty"`
 	Message string `json:"message"`
-	Payload any    `json:"payload,omitempty"`
+	Payload string `json:"payload,omitempty"`
 
 	ErrorType    string `json:"error_type,omitempty"`
 	ErrorMessage string `json:"error_message,omitempty"`
@@ -58,18 +58,38 @@ type Event struct {
 
 // stringifyJSON renders v as a compact JSON string. Strings are passed through
 // unchanged (so already-serialized bodies are not double-encoded).
-func stringifyJSON(v any) string {
+//
+// A marshalling failure is reported rather than swallowed: silently emitting an
+// empty payload would drop the very data the caller asked to log.
+func stringifyJSON(v any) (string, error) {
 	if v == nil {
-		return ""
+		return "", nil
 	}
 	if s, ok := v.(string); ok {
-		return s
+		return s, nil
 	}
 	b, err := json.Marshal(v)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return string(b)
+	return string(b), nil
+}
+
+// renderFailure is written in place of a value that cannot be serialized, so the
+// log line records that data was dropped instead of appearing to have none.
+func renderFailure(err error) string {
+	return "[unserializable: " + err.Error() + "]"
+}
+
+// stringifyOrFailure renders v, falling back to a visible marker when it cannot
+// be marshalled. Used where a single bad nested value must not cost the whole
+// log line.
+func stringifyOrFailure(v any) string {
+	s, err := stringifyJSON(v)
+	if err != nil {
+		return renderFailure(err)
+	}
+	return s
 }
 
 // MarshalJSON renders IntegrationInfo with request_body/response_body as
@@ -90,11 +110,11 @@ func (i IntegrationInfo) MarshalJSON() ([]byte, error) {
 		RetryCount:         i.RetryCount,
 	}
 	if i.RequestBody != nil {
-		s := stringifyJSON(i.RequestBody)
+		s := stringifyOrFailure(i.RequestBody)
 		a.RequestBody = &s
 	}
 	if i.ResponseBody != nil {
-		s := stringifyJSON(i.ResponseBody)
+		s := stringifyOrFailure(i.ResponseBody)
 		a.ResponseBody = &s
 	}
 	return json.Marshal(a)

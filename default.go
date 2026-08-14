@@ -1,29 +1,24 @@
 package gophlog
 
 import (
-	"sync"
+	"sync/atomic"
 )
 
-var (
-	defaultMu     sync.RWMutex
-	defaultLogger = New()
-)
+// defaultLogger is stored atomically so the package-level helpers resolve it
+// with a single atomic load instead of taking a lock on every log call.
+var defaultLogger atomic.Pointer[Logger]
+
+func init() { defaultLogger.Store(New()) }
 
 // Default returns the package-level default logger.
-func Default() *Logger {
-	defaultMu.RLock()
-	defer defaultMu.RUnlock()
-	return defaultLogger
-}
+func Default() *Logger { return defaultLogger.Load() }
 
-// SetDefault replaces the package-level default logger.
+// SetDefault replaces the package-level default logger. A nil logger is ignored.
 func SetDefault(l *Logger) {
 	if l == nil {
 		return
 	}
-	defaultMu.Lock()
-	defaultLogger = l
-	defaultMu.Unlock()
+	defaultLogger.Store(l)
 }
 
 // Trace starts a TRACE entry on the default logger.
@@ -42,5 +37,5 @@ func Warn(message, event string) *Entry { return Default().Warn(message, event) 
 func Error(message, event string) *Entry { return Default().Error(message, event) }
 
 // Fatal starts a FATAL entry on the default logger. It does NOT terminate the
-// process; the caller decides whether to exit after logging.
+// process; the caller decides whether to exit after gophlog.
 func Fatal(message, event string) *Entry { return Default().Fatal(message, event) }

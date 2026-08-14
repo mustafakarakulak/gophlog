@@ -89,10 +89,8 @@ func main() {
 
 func demoMiddleware(log *gophlog.Logger) {
 	mw := middleware.New(middleware.Options{
-		Logger:          log,
-		LogRequestBody:  true,
-		LogResponseBody: true,
-		IncludePaths:    []string{"/api/*"},
+		Logger:       log,
+		IncludePaths: []string{"/api/*"},
 		MaskFieldStrategies: map[string]gophlog.MaskingStrategy{
 			"creditCard": gophlog.CreditCard,
 		},
@@ -100,7 +98,7 @@ func demoMiddleware(log *gophlog.Logger) {
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte(`{"invoice_id":"INV-001","status":"created"}`))
+		_, _ = w.Write([]byte(`{"invoice_id":"INV-001","status":"created"}`))
 	}))
 	req := httptest.NewRequest(http.MethodPost, "/api/invoices?page=1",
 		strings.NewReader(`{"amount":1000,"creditCard":"1111999988883333"}`))
@@ -110,15 +108,13 @@ func demoMiddleware(log *gophlog.Logger) {
 func demoHTTPClient(log *gophlog.Logger) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"paymentId":"PAY-123","status":"success"}`))
+		_, _ = w.Write([]byte(`{"paymentId":"PAY-123","status":"success"}`))
 	}))
 	defer srv.Close()
 
 	client := httpclient.NewClient(nil, httpclient.Options{
-		Logger:          log,
-		LogRequestBody:  true,
-		LogResponseBody: true,
-		EventName:       "payment_api_request",
+		Logger:    log,
+		EventName: "payment_api_request",
 		MaskFieldStrategies: map[string]gophlog.MaskingStrategy{
 			"creditCard": gophlog.CreditCard,
 		},
@@ -131,6 +127,6 @@ func demoHTTPClient(log *gophlog.Logger) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 }

@@ -71,6 +71,34 @@ func NewCorrelationID() string {
 	return hex.EncodeToString(b[:])
 }
 
+// MaxCorrelationIDLen is the longest correlation ID accepted from an untrusted
+// source by IsValidCorrelationID.
+const MaxCorrelationIDLen = 128
+
+// IsValidCorrelationID reports whether id is safe to adopt from an untrusted
+// source such as an inbound HTTP header.
+//
+// An accepted ID is 1..MaxCorrelationIDLen bytes of ASCII letters, digits and
+// the separators '-', '_', '.' and ':' — enough for hex IDs, UUIDs and W3C
+// trace-context values. Rejecting anything else keeps a client from steering
+// audit logs with oversized or structured values; callers should generate a
+// fresh ID instead of trusting a rejected one.
+func IsValidCorrelationID(id string) bool {
+	if id == "" || len(id) > MaxCorrelationIDLen {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '-', c == '_', c == '.', c == ':':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // WithCorrelationID stores the correlation ID (trace_id) in the context.
 func WithCorrelationID(ctx context.Context, id string) context.Context {
 	return withField(ctx, func(f *ctxFields) { f.correlationID = id })

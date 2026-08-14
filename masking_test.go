@@ -29,11 +29,49 @@ func TestMaskCreditCard(t *testing.T) {
 }
 
 func TestMaskCreditCardShort(t *testing.T) {
-	// <= 10 chars: first2 + middle + last2, no grouping.
+	// Too short to be a real card (12-19 digits), so it is hidden entirely
+	// rather than partially leaked.
 	got := MaskString("12345678", CreditCard)
-	want := "12****78"
+	want := "********"
 	if got != want {
 		t.Errorf("short CreditCard mask = %q; want %q", got, want)
+	}
+	// A 12-digit card still gets BIN + last four.
+	if got := MaskString("123456789012", CreditCard); got != "1234 56 ** 9012" {
+		t.Errorf("12-digit CreditCard mask = %q", got)
+	}
+
+	// 11 digits is below the minimum real card length (12); BIN+last4 would
+	// reveal 10 of its 11 characters, so it must be hidden entirely.
+	if got := MaskString("12345678901", CreditCard); got != "********" {
+		t.Errorf("11-digit CreditCard mask = %q; want fully hidden", got)
+	}
+}
+
+// TestMaskStringFailClosedShort locks in that no strategy leaks a value that is
+// too short for it to hide anything.
+func TestMaskStringFailClosedShort(t *testing.T) {
+	cases := []struct {
+		in       string
+		strategy MaskingStrategy
+		want     string
+	}{
+		{"5", ShowLast1, "*"},
+		{"5", ShowLast2, "*"},
+		{"42", ShowLast2, "**"},
+		{"5", ShowFirst1, "*"},
+		{"42", ShowFirst2, "**"},
+		{"42", ShowFirst1AndLast1, "**"},
+		{"1234", ShowFirst2AndLast2, "****"},
+		{"123", CreditCard, "***"},
+		// Long enough to hide something: the strategy applies normally.
+		{"42", ShowLast1, "*2"},
+		{"123", ShowLast2, "*23"},
+	}
+	for _, c := range cases {
+		if got := MaskString(c.in, c.strategy); got != c.want {
+			t.Errorf("MaskString(%q, %q) = %q; want %q", c.in, c.strategy, got, c.want)
+		}
 	}
 }
 

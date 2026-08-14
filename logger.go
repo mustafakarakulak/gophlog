@@ -16,7 +16,9 @@ import (
 // trailing Z (e.g. 2006-01-02T15:04:05.000Z).
 const timestampLayout = "2006-01-02T15:04:05.000Z"
 
-// defaultStackTraceLimit caps captured stack traces at 3000 characters.
+// defaultStackTraceLimit caps captured stack traces at 3000 characters. The
+// "... [truncated]" marker is appended AFTER the cut, so a truncated value is
+// up to 15 bytes longer than the limit (see truncate).
 const defaultStackTraceLimit = 3000
 
 // TraceExtractor pulls distributed-tracing identifiers from a context. It lets
@@ -41,13 +43,15 @@ type Logger struct {
 // derived from it, so all of them serialize writes through one mutex and react
 // to one SetMinLevel.
 type loggerCore struct {
-	mu         sync.Mutex
-	w          io.Writer
-	minLevel   atomic.Int32 // stores the minimum level's severity
-	trace      TraceExtractor
-	kube       *KubernetesInfo
-	stackLimit int
-	now        func() time.Time
+	mu          sync.Mutex
+	w           io.Writer
+	minLevel    atomic.Int32 // stores the minimum level's severity
+	trace       TraceExtractor
+	kube        *KubernetesInfo
+	stackLimit  int
+	now         func() time.Time
+	autoTraceID bool
+	onError     func(error)
 }
 
 // lineBuffer bundles a render buffer with a JSON encoder bound to it, so both
@@ -107,6 +111,25 @@ func WithKubernetesFromEnv() Option {
 // WithStackTraceLimit overrides the maximum stack-trace length (default 3000).
 func WithStackTraceLimit(max int) Option { return func(l *Logger) { l.core.stackLimit = max } }
 
+// WithAutoTraceID makes the logger synthesize a random trace_id for entries that
+// resolve none from the entry, the context or the TraceExtractor.
+//
+// It is off by default: two unrelated entries would otherwise each get their own
+// invented trace, which inflates trace_id cardinality and makes a "search by
+// trace" in OpenSearch return traces that never existed. Prefer establishing one
+// correlation ID per request (the HTTP middleware does this) and propagating it
+// through the context.
+func WithAutoTraceID() Option { return func(l *Logger) { l.core.autoTraceID = true } }
+
+// WithOnError registers a callback invoked when the logger cannot do its job:
+// the writer returned an error, or a payload/entry could not be serialized.
+// Without it such failures are silent.
+//
+// The callback runs on the logging goroutine and must not log through this
+// library (that would recurse); use it to increment a metric or write to
+// os.Stderr.
+func WithOnError(fn func(error)) Option { return func(l *Logger) { l.core.onError = fn } }
+
 // WithClock overrides the time source (useful for tests).
 func WithClock(now func() time.Time) Option { return func(l *Logger) { l.core.now = now } }
 
@@ -136,7 +159,7 @@ func (l *Logger) enabledSeverity(sev int) bool {
 }
 
 // SetMinLevel changes the minimum level at runtime. It is safe to call
-// concurrently with logging. The level is shared with every logger derived via
+// concurrently with gophlog. The level is shared with every logger derived via
 // With, so changing it on a child changes it for the whole family.
 func (l *Logger) SetMinLevel(min Level) {
 	l.core.minLevel.Store(int32(min.severity()))
@@ -161,7 +184,7 @@ func (l *Logger) Error(message, event string) *Entry { return newEntry(l, ERROR,
 
 // Fatal starts a FATAL-level log entry. Unlike the standard library's
 // log.Fatal it does NOT terminate the process; the caller decides whether to
-// exit after logging.
+// exit after gophlog.
 func (l *Logger) Fatal(message, event string) *Entry { return newEntry(l, FATAL, message, event) }
 
 // At starts a log entry at an arbitrary level.
@@ -193,6 +216,13 @@ func formatTimestamp(ts time.Time) string {
 	return s
 }
 
+// reportError hands a logging failure to the configured error callback, if any.
+func (l *Logger) reportError(err error) {
+	if fn := l.core.onError; fn != nil {
+		fn(err)
+	}
+}
+
 // emit builds the Event from an Entry and writes it as a single JSON line.
 func (l *Logger) emit(e *Entry) {
 	if !l.enabledSeverity(e.sev) {
@@ -210,6 +240,7 @@ func (l *Logger) emit(e *Entry) {
 	}()
 
 	if err := enc.Encode(event); err != nil {
+		l.reportError(err)
 		// Fall back to a minimal record so a bad payload/extra value never
 		// silently drops the log line entirely. Encode already wrote a partial
 		// object, so reset before re-encoding.
@@ -223,13 +254,17 @@ func (l *Logger) emit(e *Entry) {
 			ErrorType:    "LogSerializationError",
 			ErrorMessage: err.Error(),
 		}); encErr != nil {
+			l.reportError(encErr)
 			return
 		}
 	}
 
 	l.core.mu.Lock()
-	l.core.w.Write(buf.Bytes())
+	_, werr := l.core.w.Write(buf.Bytes())
 	l.core.mu.Unlock()
+	if werr != nil {
+		l.reportError(werr)
+	}
 }
 
 // build assembles the final Event, resolving trace context and rendering the
@@ -255,7 +290,7 @@ func (l *Logger) build(e *Entry) *Event {
 		traceID = firstNonEmpty(traceID, tID)
 		spanID = firstNonEmpty(spanID, sID)
 	}
-	if traceID == "" {
+	if traceID == "" && l.core.autoTraceID {
 		traceID = NewCorrelationID()
 	}
 
@@ -323,10 +358,40 @@ func (l *Logger) build(e *Entry) *Event {
 	}
 
 	// Resolve payload (struct tags -> masking -> stringify) and merge extras.
-	payload, extra := l.renderPayload(e, b)
+	payload, extra, err := l.renderPayload(e, b)
 	ev.Payload = payload
+	if err != nil {
+		// The payload could not be serialized. Record that on the entry instead
+		// of emitting a silently empty payload, and surface it to the error
+		// callback. An error the caller already attached is never overwritten.
+		l.reportError(err)
+		if ev.ErrorType == "" {
+			ev.ErrorType = "LogSerializationError"
+			ev.ErrorMessage = err.Error()
+		}
+	}
 
-	if len(extra) > 0 || len(e.extra) > 0 || len(b.extra) > 0 {
+	// A single extras source is referenced directly instead of copied: the Event
+	// never outlives the emit, entry and payload extras are owned by this call,
+	// and bound extras are immutable once the derived logger exists.
+	sources := 0
+	var soleExtra map[string]any
+	if len(b.extra) > 0 {
+		sources++
+		soleExtra = b.extra
+	}
+	if len(extra) > 0 {
+		sources++
+		soleExtra = extra
+	}
+	if len(e.extra) > 0 {
+		sources++
+		soleExtra = e.extra
+	}
+	switch {
+	case sources == 1:
+		ev.Extra = soleExtra
+	case sources > 1:
 		merged := make(map[string]any, len(b.extra)+len(extra)+len(e.extra))
 		for k, v := range b.extra { // bound extras are the weakest defaults
 			merged[k] = v
@@ -346,9 +411,13 @@ func (l *Logger) build(e *Entry) *Event {
 // renderPayload normalises the payload (honouring struct tags), applies any
 // field masking strategies, and returns the stringified JSON payload plus any
 // extracted logextra fields.
-func (l *Logger) renderPayload(e *Entry, b *boundFields) (payload any, extra map[string]any) {
+//
+// When the payload cannot be serialized the returned payload is a visible
+// marker (never an empty string) and the error is returned so the caller can
+// record it on the entry.
+func (l *Logger) renderPayload(e *Entry, b *boundFields) (payload string, extra map[string]any, err error) {
 	if e.payload == nil {
-		return nil, nil
+		return "", nil, nil
 	}
 	normalized, extra := processPayload(e.payload)
 	// Both maps are lower-cased on insert, so the lookup map never has to be
@@ -369,9 +438,22 @@ func (l *Logger) renderPayload(e *Entry, b *boundFields) (payload any, extra map
 		}
 	}
 	if len(strategies) > 0 {
-		normalized = applyMaskingLower(normalized, strategies)
+		// processPayload built both trees exclusively for this entry, so masking
+		// rewrites them in place instead of deep-copying every node.
+		applyMaskingLowerInPlace(normalized, strategies)
+		// logextra lifts fields OUT of the payload before the strategies above
+		// run, so the extra map must be masked too — otherwise Mask("refId")
+		// combined with a `logextra` tag on refId would leak the raw value
+		// through the extra object.
+		if len(extra) > 0 {
+			applyMaskingLowerInPlace(extra, strategies)
+		}
 	}
-	return stringifyJSON(normalized), extra
+	rendered, err := stringifyJSON(normalized)
+	if err != nil {
+		return renderFailure(err), extra, err
+	}
+	return rendered, extra, nil
 }
 
 func firstNonEmpty(values ...string) string {
@@ -383,6 +465,10 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+// truncate cuts s at max bytes and appends a truncation marker. The marker is
+// additive — output may exceed max by its length — so the cap is on the
+// retained content, not the rendered string; CapBody in internal/httplog
+// follows the same convention.
 func truncate(s string, max int) string {
 	if max <= 0 || len(s) <= max {
 		return s

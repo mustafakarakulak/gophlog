@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,9 +27,11 @@ type Options struct {
 	// Logger to use. Defaults to gophlog.Default().
 	Logger *gophlog.Logger
 
-	// LogRequestBody / LogResponseBody toggle body capture. Default: true.
-	LogRequestBody  bool
-	LogResponseBody bool
+	// DisableRequestBody / DisableResponseBody turn off body capture, which is
+	// on by default. They are phrased negatively so the zero-value Options
+	// captures bodies, as documented.
+	DisableRequestBody  bool
+	DisableResponseBody bool
 
 	// MaxBodySize caps captured bodies in bytes. Default: 100 KiB.
 	MaxBodySize int
@@ -52,7 +55,9 @@ type Options struct {
 	ExcludeURLs []string
 	IncludeURLs []string
 
-	// LogCurl prints an equivalent curl command for each request.
+	// LogCurl prints an equivalent curl command for each request. Credential
+	// headers (Authorization, Cookie, X-Api-Key, ...) are redacted and the body
+	// is the masked one, so the command is not runnable as-is.
 	LogCurl bool
 
 	// CurlWriter receives the curl commands when LogCurl is enabled. It defaults
@@ -87,15 +92,26 @@ func (o *Options) applyDefaults() {
 type Transport struct {
 	Base http.RoundTripper
 	opts Options
+
+	// lowerStrategies / extraWant are derived from opts once at construction —
+	// options are static after New — so the per-request masking and extra
+	// collection paths never rebuild their lookups.
+	lowerStrategies map[string]gophlog.MaskingStrategy
+	extraWant       map[string]string
 }
 
-// New wraps base (or http.DefaultTransport) with request/response logging.
+// New wraps base (or http.DefaultTransport) with request/response gophlog.
 func New(base http.RoundTripper, opts Options) *Transport {
 	opts.applyDefaults()
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	return &Transport{Base: base, opts: opts}
+	return &Transport{
+		Base:            base,
+		opts:            opts,
+		lowerStrategies: httplog.LowerStrategies(opts.MaskFieldStrategies),
+		extraWant:       httplog.LowerExtraFields(opts.LogExtraFields),
+	}
 }
 
 // NewClient returns an *http.Client whose transport logs requests. If client is
@@ -123,7 +139,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	ctx := req.Context()
 
 	// Mask sensitive query parameters before the URL is logged.
-	url := maskedURL(req.URL, opts.MaskFieldStrategies)
+	url := maskedURL(req.URL, t.lowerStrategies)
 
 	// Per the http.RoundTripper contract we must not mutate the caller's
 	// request; operate on a clone instead (header changes + body capture).
@@ -134,8 +150,17 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		outReq.Header.Set(gophlog.CorrelationHeader, cid)
 	}
 
+	// Fast path: when no level this call could log at is enabled and no curl
+	// dump is requested, skip capture and masking entirely — the entry would be
+	// dropped at emit anyway. The correlation ID above still propagates.
+	successEnabled := opts.Logger.Enabled(opts.SuccessLogLevel)
+	errorEnabled := opts.Logger.Enabled(opts.ErrorLogLevel)
+	if !successEnabled && !errorEnabled && !opts.LogCurl {
+		return t.Base.RoundTrip(outReq)
+	}
+
 	var requestBody string
-	if opts.LogRequestBody && req.Body != nil {
+	if !opts.DisableRequestBody && req.Body != nil {
 		captured, restored, truncated := httplog.CaptureBody(req.Body, opts.MaxBodySize)
 		if !truncated {
 			body := append([]byte(nil), captured...)
@@ -149,8 +174,19 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		outReq.Body = restored
 	}
 
+	// Mask the request body once, before it can reach either the curl output or
+	// the log line — the raw body may hold credentials. The extra map is only
+	// needed when LogExtraFields can fill it.
+	var extra map[string]any
+	if len(t.extraWant) > 0 {
+		extra = make(map[string]any)
+	}
+	maskedReq := t.processBody(requestBody, outReq.Header.Get("Content-Type"), true, extra)
+
 	if opts.LogCurl {
-		fmt.Fprintln(opts.CurlWriter, buildCurl(outReq, requestBody))
+		// CurlWriter is a diagnostic side channel (os.Stderr by default); a write
+		// failure there must not disturb the request being proxied.
+		_, _ = fmt.Fprintln(opts.CurlWriter, buildCurl(outReq, url, maskedReq, t.lowerStrategies))
 	}
 
 	method := outReq.Method
@@ -158,11 +194,10 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.Base.RoundTrip(outReq)
 	durationMs := float64(time.Since(begin).Microseconds()) / 1000.0
 
-	reqContentType := outReq.Header.Get("Content-Type")
-
 	if err != nil {
-		extra := map[string]any{}
-		maskedReq := processBody(requestBody, reqContentType, opts, true, extra)
+		if !errorEnabled {
+			return nil, err
+		}
 		eventName := opts.EventName + "_exception"
 		msg := httplog.Message(method, url, 0, durationMs)
 		entry := opts.Logger.At(opts.ErrorLogLevel, msg, eventName).
@@ -179,8 +214,21 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 
+	status := resp.StatusCode
+	level := opts.SuccessLogLevel
+	enabled := successEnabled
+	if status >= 400 {
+		level = opts.ErrorLogLevel
+		enabled = errorEnabled
+	}
+	// The level for the actual status is filtered out (e.g. minimum level ERROR
+	// and the call succeeded): hand the response back without touching its body.
+	if !enabled {
+		return resp, nil
+	}
+
 	var responseBody string
-	if opts.LogResponseBody && resp.Body != nil {
+	if !opts.DisableResponseBody && resp.Body != nil {
 		captured, restored, truncated := httplog.CaptureBody(resp.Body, opts.MaxBodySize)
 		if truncated {
 			responseBody = bodyTooLarge
@@ -190,15 +238,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		resp.Body = restored
 	}
 
-	status := resp.StatusCode
-	level := opts.SuccessLogLevel
-	if status >= 400 {
-		level = opts.ErrorLogLevel
-	}
-
-	extra := map[string]any{}
-	maskedReq := processBody(requestBody, reqContentType, opts, true, extra)
-	maskedResp := processBody(responseBody, resp.Header.Get("Content-Type"), opts, false, extra)
+	maskedResp := t.processBody(responseBody, resp.Header.Get("Content-Type"), false, extra)
 
 	msg := httplog.Message(method, url, status, durationMs)
 	entry := opts.Logger.At(level, msg, opts.EventName).
@@ -223,17 +263,27 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 // masking is never bypassed by a partial, unparseable body.
 const bodyTooLarge = "[body not logged: exceeds MaxBodySize]"
 
-// maskedURL returns u as a string with sensitive query parameters masked. The
+// maskedURL returns u as a string with sensitive query parameters masked
+// (strategies is the pre-lowered map) and any userinfo password redacted. The
 // original URL is never mutated.
 func maskedURL(u *url.URL, strategies map[string]gophlog.MaskingStrategy) string {
 	if u == nil {
 		return ""
 	}
+	// A URL can carry basic-auth credentials in its userinfo section
+	// (https://user:password@host/...); net/http turns those into an
+	// Authorization header, which the curl dump already redacts — the URL
+	// string must not leak the same secret. "xxxxx" mirrors url.Redacted.
+	if _, hasPassword := u.User.Password(); hasPassword {
+		clone := *u
+		clone.User = url.UserPassword(u.User.Username(), "xxxxx")
+		u = &clone
+	}
 	if u.RawQuery == "" || len(strategies) == 0 {
 		return u.String()
 	}
 	q := u.Query()
-	httplog.MaskQueryValues(q, strategies)
+	httplog.MaskQueryValuesLower(q, strategies)
 	clone := *u
 	clone.RawQuery = httplog.RenderQuery(q)
 	return clone.String()
@@ -245,48 +295,103 @@ func maskedURL(u *url.URL, strategies map[string]gophlog.MaskingStrategy) string
 //
 // The body is decoded exactly once; the final Marshal both compacts and
 // re-serializes it, so no separate formatting pass is needed.
-func processBody(body, contentType string, opts Options, isRequest bool, extra map[string]any) string {
+func (t *Transport) processBody(body, contentType string, isRequest bool, extra map[string]any) string {
 	if body == "" {
 		return ""
+	}
+	// The oversize sentinel is a fixed marker, not body content — never cap it
+	// (a tiny MaxBodySize would otherwise truncate the marker itself).
+	if body == bodyTooLarge {
+		return body
+	}
+	// Nothing to mask and nothing to lift into extra: the decode/encode round
+	// trip below would only re-serialize the body, so log it as-is (capped).
+	if len(t.lowerStrategies) == 0 && len(t.extraWant) == 0 {
+		return httplog.CapBody(body, t.opts.MaxBodySize)
 	}
 	var decoded any
 	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
 		if isFormContentType(contentType) {
-			if masked, ok := httplog.MaskFormBody(body, opts.MaskFieldStrategies); ok {
-				return httplog.CapBody(masked, opts.MaxBodySize)
+			if masked, ok := httplog.MaskFormBodyLower(body, t.lowerStrategies); ok {
+				return httplog.CapBody(masked, t.opts.MaxBodySize)
 			}
 		}
-		return httplog.CapBody(body, opts.MaxBodySize)
+		return httplog.CapBody(body, t.opts.MaxBodySize)
 	}
-	if len(opts.LogExtraFields) > 0 {
+	// Masking runs BEFORE extra extraction, so a field named in both
+	// MaskFieldStrategies and LogExtraFields is lifted in its masked form —
+	// the extra object must never carry a value the body already hides.
+	// decoded is exclusively owned (fresh from json.Unmarshal), so it is masked
+	// in place instead of paying MaskJSON's defensive deep copy.
+	httplog.MaskDecodedInPlace(decoded, t.lowerStrategies)
+	if len(t.extraWant) > 0 {
 		prefix := "response_"
 		if isRequest {
 			prefix = "request_"
 		}
-		httplog.CollectExtra(decoded, opts.LogExtraFields, prefix, extra)
-	}
-	if len(opts.MaskFieldStrategies) > 0 {
-		decoded = gophlog.MaskJSON(decoded, opts.MaskFieldStrategies)
+		httplog.CollectExtraLower(decoded, t.extraWant, prefix, extra)
 	}
 	out, err := json.Marshal(decoded)
 	if err != nil {
-		return httplog.CapBody(body, opts.MaxBodySize)
+		return httplog.CapBody(body, t.opts.MaxBodySize)
 	}
-	return httplog.CapBody(string(out), opts.MaxBodySize)
+	return httplog.CapBody(string(out), t.opts.MaxBodySize)
 }
 
 func isFormContentType(contentType string) bool {
 	return strings.Contains(strings.ToLower(contentType), "application/x-www-form-urlencoded")
 }
 
-func buildCurl(req *http.Request, body string) string {
+// redactedHeaders are always hidden in curl output: they carry credentials, and
+// a curl command is copy-pasted and pasted into tickets far more often than a log
+// line is. Names are lower-case for case-insensitive matching.
+var redactedHeaders = map[string]struct{}{
+	"authorization":       {},
+	"proxy-authorization": {},
+	"cookie":              {},
+	"set-cookie":          {},
+	"x-api-key":           {},
+	"api-key":             {},
+	"x-auth-token":        {},
+	"x-access-token":      {},
+	"x-session-token":     {},
+}
+
+// headerValueForCurl renders a header value for curl output, hiding credential
+// headers outright and masking any other header the caller named in
+// MaskFieldStrategies (strategies is the pre-lowered map).
+func headerValueForCurl(name, value string, strategies map[string]gophlog.MaskingStrategy) string {
+	lower := strings.ToLower(name)
+	if _, secret := redactedHeaders[lower]; secret {
+		return "[REDACTED]"
+	}
+	if strategy, ok := strategies[lower]; ok {
+		return gophlog.MaskString(value, strategy)
+	}
+	return value
+}
+
+// buildCurl renders an equivalent curl command for req. Credential headers are
+// redacted, so the output is not runnable as-is against an authenticated
+// endpoint — that is deliberate. maskedURL is the pre-masked URL string (never
+// req.URL, whose raw query may hold secrets named in MaskFieldStrategies);
+// strategies is the pre-lowered map.
+func buildCurl(req *http.Request, maskedURL, body string, strategies map[string]gophlog.MaskingStrategy) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "curl -X %s '%s'", req.Method, req.URL)
-	for key, values := range req.Header {
-		for _, v := range values {
-			fmt.Fprintf(&b, " \\\n  -H '%s: %s'", key, v)
+	fmt.Fprintf(&b, "curl -X %s '%s'", req.Method, maskedURL)
+
+	// Sorted so the same request always renders the same command.
+	names := make([]string, 0, len(req.Header))
+	for key := range req.Header {
+		names = append(names, key)
+	}
+	sort.Strings(names)
+	for _, key := range names {
+		for _, v := range req.Header[key] {
+			fmt.Fprintf(&b, " \\\n  -H '%s: %s'", key, headerValueForCurl(key, v, strategies))
 		}
 	}
+
 	if body != "" {
 		escaped := strings.ReplaceAll(body, "'", `'\''`)
 		fmt.Fprintf(&b, " \\\n  --data '%s'", escaped)

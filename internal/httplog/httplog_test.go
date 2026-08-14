@@ -1,6 +1,7 @@
 package httplog
 
 import (
+	"errors"
 	"io"
 	"net/url"
 	"reflect"
@@ -197,5 +198,56 @@ func TestCollectExtra(t *testing.T) {
 func TestMessage(t *testing.T) {
 	if got := Message("GET", "/x", 200, 12.5); got != "GET /x - 200 (12.50ms)" {
 		t.Errorf("Message = %q", got)
+	}
+}
+
+// failingBody yields some data, then a mid-stream error, then tracks Close.
+type failingBody struct {
+	data   *strings.Reader
+	err    error
+	closed bool
+}
+
+func (f *failingBody) Read(p []byte) (int, error) {
+	n, err := f.data.Read(p)
+	if err == io.EOF {
+		return n, f.err
+	}
+	return n, err
+}
+
+func (f *failingBody) Close() error {
+	f.closed = true
+	return nil
+}
+
+// TestCaptureBodyReadError locks in that a mid-stream failure is replayed to
+// the consumer instead of being swallowed as a clean EOF over truncated data,
+// and that the partial fragment never reaches the log (masking could not be
+// applied to it).
+func TestCaptureBodyReadError(t *testing.T) {
+	boom := errors.New("connection reset")
+	body := &failingBody{data: strings.NewReader(`{"half":`), err: boom}
+
+	captured, restored, truncated := CaptureBody(body, 1024)
+	if captured != nil {
+		t.Errorf("nothing should be captured on a read error, got %q", captured)
+	}
+	if truncated {
+		t.Error("a read error is not truncation")
+	}
+
+	data, err := io.ReadAll(restored)
+	if string(data) != `{"half":` {
+		t.Errorf("consumer should still receive the partial data, got %q", data)
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("consumer should see the original error, got %v", err)
+	}
+	if err := restored.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !body.closed {
+		t.Error("closing the restored reader should close the original body")
 	}
 }

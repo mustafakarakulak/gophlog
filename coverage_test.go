@@ -389,17 +389,26 @@ func TestScalarToString(t *testing.T) {
 }
 
 func TestStringifyJSON(t *testing.T) {
-	if stringifyJSON(nil) != "" {
-		t.Error("nil → empty")
+	if s, err := stringifyJSON(nil); s != "" || err != nil {
+		t.Errorf("nil → empty, no error; got %q, %v", s, err)
 	}
-	if stringifyJSON("raw") != "raw" {
-		t.Error("string passthrough")
+	if s, err := stringifyJSON("raw"); s != "raw" || err != nil {
+		t.Errorf("string passthrough; got %q, %v", s, err)
 	}
-	if stringifyJSON(map[string]int{"a": 1}) != `{"a":1}` {
-		t.Error("marshal map")
+	if s, err := stringifyJSON(map[string]int{"a": 1}); s != `{"a":1}` || err != nil {
+		t.Errorf("marshal map; got %q, %v", s, err)
 	}
-	if stringifyJSON(make(chan int)) != "" {
-		t.Error("unmarshalable → empty")
+	// An unmarshalable value must report the failure instead of quietly
+	// returning an empty payload.
+	s, err := stringifyJSON(make(chan int))
+	if err == nil {
+		t.Error("unmarshalable value should return an error")
+	}
+	if s != "" {
+		t.Errorf("failed render returns no string; got %q", s)
+	}
+	if got := stringifyOrFailure(make(chan int)); !strings.HasPrefix(got, "[unserializable:") {
+		t.Errorf("stringifyOrFailure marker = %q", got)
 	}
 }
 

@@ -25,9 +25,11 @@ type Options struct {
 	// Logger is the logger to use. Defaults to gophlog.Default().
 	Logger *gophlog.Logger
 
-	// LogRequestBody / LogResponseBody toggle body capture. Default: true.
-	LogRequestBody  bool
-	LogResponseBody bool
+	// DisableRequestBody / DisableResponseBody turn off body capture, which is
+	// on by default. They are phrased negatively so the zero-value Options
+	// captures bodies, as documented.
+	DisableRequestBody  bool
+	DisableResponseBody bool
 
 	// MaxBodySize caps captured bodies in bytes. Default: 100 KiB.
 	MaxBodySize int
@@ -85,23 +87,35 @@ func (o *Options) applyDefaults() {
 	}
 }
 
+// precomputed holds the lookups derived from Options at construction time.
+// Options are static after New, so the per-request paths (query/body masking,
+// extra-field collection) never rebuild them.
+type precomputed struct {
+	lowerStrategies map[string]gophlog.MaskingStrategy
+	extraWant       map[string]string
+}
+
 // New returns middleware that logs requests using the given options.
 func New(opts Options) func(http.Handler) http.Handler {
 	opts.applyDefaults()
-	// Default body capture to true unless explicitly configured via NewDefault.
+	pre := precomputed{
+		lowerStrategies: httplog.LowerStrategies(opts.MaskFieldStrategies),
+		extraWant:       httplog.LowerExtraFields(opts.LogExtraFields),
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			handle(opts, next, w, r)
+			handle(opts, pre, next, w, r)
 		})
 	}
 }
 
-// NewDefault returns middleware with body capture enabled and default options.
+// NewDefault returns middleware with the default options, which include
+// request/response body capture. It is equivalent to New(Options{}).
 func NewDefault() func(http.Handler) http.Handler {
-	return New(Options{LogRequestBody: true, LogResponseBody: true})
+	return New(Options{})
 }
 
-func handle(opts Options, next http.Handler, w http.ResponseWriter, r *http.Request) {
+func handle(opts Options, pre precomputed, next http.Handler, w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
 	if httplog.ShouldExclude(path, opts.ExcludePaths) || !httplog.ShouldInclude(path, opts.IncludePaths) {
@@ -110,9 +124,11 @@ func handle(opts Options, next http.Handler, w http.ResponseWriter, r *http.Requ
 	}
 
 	// Resolve / propagate correlation ID and workflow headers via context.
+	// The inbound header is client-controlled, so an absent or malformed value
+	// is replaced by a freshly generated ID rather than trusted into the logs.
 	ctx := r.Context()
 	correlationID := r.Header.Get(gophlog.CorrelationHeader)
-	if correlationID == "" {
+	if !gophlog.IsValidCorrelationID(correlationID) {
 		correlationID = gophlog.NewCorrelationID()
 	}
 	ctx = gophlog.WithCorrelationID(ctx, correlationID)
@@ -126,25 +142,46 @@ func handle(opts Options, next http.Handler, w http.ResponseWriter, r *http.Requ
 	}
 	r = r.WithContext(ctx)
 
+	// Fast path: when no level this request could log at is enabled, skip
+	// capture and masking entirely — the entry would be dropped at emit anyway.
+	// Context propagation above still happened, so handlers and outbound calls
+	// keep their correlation ID.
+	successEnabled := opts.Logger.Enabled(opts.SuccessLogLevel)
+	errorEnabled := opts.Logger.Enabled(opts.ErrorLogLevel)
+	if !successEnabled && !errorEnabled {
+		next.ServeHTTP(w, r)
+		return
+	}
+
 	// Capture request body without ever truncating what the handler receives.
+	// bytes_in comes from the Content-Length header when declared, so it stays
+	// correct for bodies larger than MaxBodySize and when capture is disabled;
+	// the captured length is the fallback for chunked (unknown-length) bodies.
 	var requestBody string
-	var reqBytes int64
-	if opts.LogRequestBody && r.Body != nil {
+	reqBytes := r.ContentLength
+	if !opts.DisableRequestBody && r.Body != nil {
 		captured, restored, truncated := httplog.CaptureBody(r.Body, opts.MaxBodySize)
 		r.Body = restored
-		reqBytes = int64(len(captured))
+		if reqBytes < 0 {
+			reqBytes = int64(len(captured))
+		}
 		if truncated {
 			requestBody = bodyTooLarge
 		} else {
 			requestBody = string(captured)
 		}
 	}
+	if reqBytes < 0 {
+		reqBytes = 0
+	}
 
 	rec := &responseRecorder{
 		ResponseWriter: w,
 		status:         http.StatusOK,
-		capture:        opts.LogResponseBody,
+		capture:        !opts.DisableResponseBody,
 		max:            opts.MaxBodySize,
+		successEnabled: successEnabled,
+		errorEnabled:   errorEnabled,
 	}
 
 	begin := time.Now()
@@ -152,7 +189,7 @@ func handle(opts Options, next http.Handler, w http.ResponseWriter, r *http.Requ
 	durationMs := float64(time.Since(begin).Microseconds()) / 1000.0
 
 	responseBody := ""
-	if opts.LogResponseBody {
+	if !opts.DisableResponseBody {
 		if rec.truncated {
 			responseBody = bodyTooLarge
 		} else {
@@ -162,13 +199,25 @@ func handle(opts Options, next http.Handler, w http.ResponseWriter, r *http.Requ
 
 	status := rec.status
 	level := opts.SuccessLogLevel
+	enabled := successEnabled
 	if status >= 400 {
 		level = opts.ErrorLogLevel
+		enabled = errorEnabled
+	}
+	// The level for the actual status is filtered out (e.g. minimum level ERROR
+	// and the response was a 2xx): stop before any masking or query work.
+	if !enabled {
+		return
 	}
 
-	extra := map[string]any{}
-	maskedReq := processBody(requestBody, r.Header.Get("Content-Type"), opts, true, extra)
-	maskedResp := processBody(responseBody, rec.Header().Get("Content-Type"), opts, false, extra)
+	// The extra map is only needed when something can fill it; most setups
+	// configure neither LogExtraFields nor an ExtraProvider.
+	var extra map[string]any
+	if len(pre.extraWant) > 0 || opts.ExtraProvider != nil {
+		extra = make(map[string]any)
+	}
+	maskedReq := processBody(requestBody, r.Header.Get("Content-Type"), opts, pre, true, extra)
+	maskedResp := processBody(responseBody, rec.Header().Get("Content-Type"), opts, pre, false, extra)
 
 	if opts.ExtraProvider != nil {
 		for k, v := range opts.ExtraProvider(r) {
@@ -182,13 +231,13 @@ func handle(opts Options, next http.Handler, w http.ResponseWriter, r *http.Requ
 	var query url.Values
 	if r.URL.RawQuery != "" {
 		query = r.URL.Query()
-		httplog.MaskQueryValues(query, opts.MaskFieldStrategies)
+		httplog.MaskQueryValuesLower(query, pre.lowerStrategies)
 	}
 
 	method := r.Method
 	fullPath := r.URL.Path
 	if r.URL.RawQuery != "" {
-		if len(opts.MaskFieldStrategies) > 0 {
+		if len(pre.lowerStrategies) > 0 {
 			fullPath += "?" + httplog.RenderQuery(query)
 		} else {
 			fullPath += "?" + r.URL.RawQuery
@@ -224,36 +273,49 @@ func handle(opts Options, next http.Handler, w http.ResponseWriter, r *http.Requ
 const bodyTooLarge = "[body not logged: exceeds MaxBodySize]"
 
 // processBody masks the FULL body and extracts extra fields, then truncates the
-// masked result for logging. Masking happens before truncation so sensitive
+// masked result for gophlog. Masking happens before truncation so sensitive
 // fields can never leak through a truncated, unparseable body. Form-urlencoded
 // bodies are masked too; any other non-JSON body is logged as-is.
 //
 // The body is decoded exactly once; the final Marshal both compacts and
 // re-serializes it, so no separate formatting pass is needed.
-func processBody(body, contentType string, opts Options, isRequest bool, extra map[string]any) string {
+func processBody(body, contentType string, opts Options, pre precomputed, isRequest bool, extra map[string]any) string {
 	if body == "" {
 		return ""
+	}
+	// The oversize sentinel is a fixed marker, not body content — never cap it
+	// (a tiny MaxBodySize would otherwise truncate the marker itself).
+	if body == bodyTooLarge {
+		return body
+	}
+	// Nothing to mask and nothing to lift into extra: the decode/encode round
+	// trip below would only re-serialize the body, so log it as-is (capped).
+	if len(pre.lowerStrategies) == 0 && len(pre.extraWant) == 0 {
+		return httplog.CapBody(body, opts.MaxBodySize)
 	}
 	var decoded any
 	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
 		if isFormContentType(contentType) {
-			if masked, ok := httplog.MaskFormBody(body, opts.MaskFieldStrategies); ok {
+			if masked, ok := httplog.MaskFormBodyLower(body, pre.lowerStrategies); ok {
 				return httplog.CapBody(masked, opts.MaxBodySize)
 			}
 		}
 		return httplog.CapBody(body, opts.MaxBodySize) // not JSON; log as-is
 	}
 
-	if len(opts.LogExtraFields) > 0 {
+	// Masking runs BEFORE extra extraction, so a field named in both
+	// MaskFieldStrategies and LogExtraFields is lifted in its masked form —
+	// the extra object must never carry a value the body already hides.
+	// decoded is exclusively owned (fresh from json.Unmarshal), so it is masked
+	// in place instead of paying MaskJSON's defensive deep copy.
+	httplog.MaskDecodedInPlace(decoded, pre.lowerStrategies)
+
+	if len(pre.extraWant) > 0 {
 		prefix := "response_"
 		if isRequest {
 			prefix = "request_"
 		}
-		httplog.CollectExtra(decoded, opts.LogExtraFields, prefix, extra)
-	}
-
-	if len(opts.MaskFieldStrategies) > 0 {
-		decoded = gophlog.MaskJSON(decoded, opts.MaskFieldStrategies)
+		httplog.CollectExtraLower(decoded, pre.extraWant, prefix, extra)
 	}
 
 	out, err := json.Marshal(decoded)
@@ -272,14 +334,33 @@ type responseRecorder struct {
 	buf         bytes.Buffer
 	written     int
 	truncated   bool
+	// successEnabled / errorEnabled mirror the logger's level checks so the
+	// capture decision can be made as soon as the status is known.
+	successEnabled bool
+	errorEnabled   bool
 }
 
 func (r *responseRecorder) WriteHeader(code int) {
+	// Informational (1xx) responses may be written any number of times before
+	// the final status — e.g. 103 Early Hints. Pass them through without
+	// latching, so the real status still reaches both the client and the log.
+	if code >= 100 && code <= 199 {
+		r.ResponseWriter.WriteHeader(code)
+		return
+	}
 	if r.wroteHeader {
 		return
 	}
 	r.status = code
 	r.wroteHeader = true
+	// The status decides which level this request logs at; if that level is
+	// filtered out, the buffered body would be discarded at the end anyway, so
+	// stop capturing before the first Write.
+	if code >= 400 {
+		r.capture = r.capture && r.errorEnabled
+	} else {
+		r.capture = r.capture && r.successEnabled
+	}
 	r.ResponseWriter.WriteHeader(code)
 }
 
