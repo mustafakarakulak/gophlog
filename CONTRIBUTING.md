@@ -1,46 +1,60 @@
-# Katkı Rehberi
+# Contributing
 
-Katkılarınız için teşekkürler! Aşağıdaki adımlar süreci kolaylaştırır.
+Thanks for taking the time to contribute. The steps below should make the
+process straightforward.
 
-## Geliştirme ortamı
+## Development environment
 
-- Go 1.23 veya üzeri gerekir.
-- Çekirdek paketin dış bağımlılığı yoktur; lütfen bu durumu korumaya çalışın.
+- Go 1.23 or newer.
+- The core package has no external dependencies; please keep it that way.
 
 ```bash
-git clone https://github.com/mustafakarakulak/go-logging.git
-cd go-logging
+git clone https://github.com/mustafakarakulak/gophlog.git
+cd gophlog
 go test ./...
 ```
 
-## Pull request açmadan önce
+## Before opening a pull request
 
-Aşağıdakilerin hepsi temiz geçmelidir (CI de bunları kontrol eder):
+All of the following must pass (CI checks the same things):
 
 ```bash
-gofmt -l .        # çıktı boş olmalı
+gofmt -l .        # must print nothing
 go vet ./...
 go build ./...
 go test -race ./...
+golangci-lint run ./...
 ```
 
-- Yeni davranış veya hata düzeltmesi için **test ekleyin**.
-- Dışa açık (exported) API değişikliklerini doc comment ve gerekiyorsa README
-  ile belgeleyin.
-- Anlamlı değişiklikleri `CHANGELOG.md` içindeki `[Unreleased]` bölümüne yazın.
+If `golangci-lint` is not installed:
 
-## Commit ve PR
+```bash
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+```
 
-- Commit mesajlarını açıklayıcı tutun.
-- PR açıklamasında neyi neden değiştirdiğinizi özetleyin.
-- Küçük, odaklı PR'lar daha hızlı incelenir.
+The configuration lives in [.golangci.yml](.golangci.yml). `errcheck` is
+deliberately strict: if you want to ignore an error return, write `_ =` at the
+call site and add a short comment explaining why.
 
-## Sürümleme
+- **Add tests** for new behaviour and for bug fixes.
+- Document exported API changes in doc comments, and in the README where it
+  matters.
+- Record meaningful changes under the `[Unreleased]` section of `CHANGELOG.md`.
 
-Proje [Semantic Versioning](https://semver.org) kullanır. `v1.0.0` öncesinde
-(`v0.x`) genel API geriye dönük uyumu bozacak şekilde değişebilir.
+## Commits and pull requests
 
-## Davranış kuralları
+- Write descriptive commit messages.
+- Summarise what you changed and why in the pull request description.
+- Small, focused pull requests get reviewed faster.
 
-Lütfen saygılı ve yapıcı bir dil kullanın. Sorularınızı issue açarak
-iletebilirsiniz.
+## Versioning
+
+The project follows [Semantic Versioning](https://semver.org). From `v1.0.0`
+onwards the exported API stays backward compatible within the v1 series;
+breaking changes only ship in a new major version. Packages under `internal/`
+are excluded from that guarantee.
+
+## Code of conduct
+
+Please keep the tone respectful and constructive. Questions are welcome as
+issues.

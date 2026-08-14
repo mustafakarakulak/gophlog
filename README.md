@@ -1,91 +1,125 @@
-# go-logging
+# gophlog
 
-[![CI](https://github.com/mustafakarakulak/go-logging/actions/workflows/ci.yml/badge.svg)](https://github.com/mustafakarakulak/go-logging/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/mustafakarakulak/go-logging.svg)](https://pkg.go.dev/github.com/mustafakarakulak/go-logging)
-[![Go Report Card](https://goreportcard.com/badge/github.com/mustafakarakulak/go-logging)](https://goreportcard.com/report/github.com/mustafakarakulak/go-logging)
+[![CI](https://github.com/mustafakarakulak/gophlog/actions/workflows/ci.yml/badge.svg)](https://github.com/mustafakarakulak/gophlog/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/mustafakarakulak/gophlog.svg)](https://pkg.go.dev/github.com/mustafakarakulak/gophlog)
+[![Go Report Card](https://goreportcard.com/badge/github.com/mustafakarakulak/gophlog)](https://goreportcard.com/report/github.com/mustafakarakulak/gophlog)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/go-1.23%2B-00ADD8.svg)](go.mod)
 
-Kubernetes, FluentBit ve OpenSearch entegrasyonu için tasarlanmış, **enterprise-grade yapısal JSON loglama** kütüphanesi.
+Enterprise-grade **structured JSON logging** for Go, built for Kubernetes,
+FluentBit and OpenSearch.
 
-## Özellikler
+## Features
 
-- ✅ **Structured JSON Logging** — stdout'a temiz, tek satır, parse edilebilir JSON
-- ✅ **Distributed Tracing** — `trace_id`/`span_id` context'ten çözülür; OpenTelemetry için pluggable `TraceExtractor`
-- ✅ **Type-Safe Sabitler** — güçlü tipli log level, type ve status değerleri
-- ✅ **Kubernetes Ready** — FluentBit toplaması için stdout çıktısı + opsiyonel pod metadata
-- ✅ **OpenSearch Uyumlu** — arama ve analiz için optimize JSON yapısı
-- ✅ **Kapsamlı Context** — HTTP, integration, queue, job ve özel metadata desteği
-- ✅ **ISO-8601 Timestamp** — UTC, milisaniye hassasiyetinde
-- ✅ **Null-Safe** — boş alanlar otomatik elenir
-- ✅ **Field Masking** — 8 strateji + `mask` / `logextra` struct tag'leri
-- ✅ **HTTP Middleware** — `net/http` istek/yanıt loglaması
-- ✅ **HTTP Client Transport** — giden çağrılar için `http.RoundTripper`
-- ✅ **log/slog Adaptörü** — standart `log/slog` API'si için `slog.Handler` köprüsü
-- ✅ **Dinamik Log Seviyesi** — `SetMinLevel` ile runtime'da, race-free değişim
-- ✅ **Child Logger** — `With()` ile ortak alanları bir kez bağlayıp türetilmiş logger kullanımı
+- ✅ **Structured JSON logging** — clean, single-line, parseable JSON on stdout
+- ✅ **Distributed tracing** — `trace_id`/`span_id` resolved from context, with a pluggable `TraceExtractor` for OpenTelemetry
+- ✅ **Type-safe constants** — strongly typed log level, type and status values
+- ✅ **Kubernetes ready** — stdout output for FluentBit collection, plus optional pod metadata
+- ✅ **OpenSearch friendly** — a JSON shape optimised for search and analysis
+- ✅ **Rich context** — HTTP, integration, queue, job and custom metadata
+- ✅ **ISO-8601 timestamps** — UTC, millisecond precision
+- ✅ **Null-safe** — empty fields are dropped automatically
+- ✅ **Field masking** — eight **fail-closed** strategies plus the `mask` / `logextra` struct tags
+- ✅ **`encoding/json`-compatible payloads** — `omitempty`, embedded structs and `json:"-"` behave identically
+- ✅ **HTTP middleware** — request/response logging for `net/http`
+- ✅ **HTTP client transport** — an `http.RoundTripper` for outbound calls
+- ✅ **log/slog adapter** — a `slog.Handler` bridge for the standard `log/slog` API
+- ✅ **Dynamic log level** — `SetMinLevel` changes it at runtime, race-free
+- ✅ **Child loggers** — bind shared fields once with `With()` and derive a logger
+- ✅ **No silent failures** — `WithOnError` surfaces write and serialization errors
 
-## Kurulum
+## Installation
 
 ```bash
-go get github.com/mustafakarakulak/go-logging
+go get github.com/mustafakarakulak/gophlog
 ```
 
 ```go
-import logging "github.com/mustafakarakulak/go-logging"
+import "github.com/mustafakarakulak/gophlog"
 ```
 
-## Hızlı Başlangıç
+## Quick start
 
 ```go
-log := logging.New()
+log := gophlog.New()
 
 log.Info("Resource created successfully", "resource_created").
     WithPayload(map[string]any{"id": "123", "name": "example"}).
     Log()
 ```
 
-Çıktı (tek satır):
+Output (a single line):
 
 ```json
-{"timestamp":"2026-01-11T00:15:34.123Z","level":"INFO","trace_id":"b7f5e0b3...","event":"resource_created","message":"Resource created successfully","payload":"{\"id\":\"123\",\"name\":\"example\"}"}
+{"timestamp":"2026-01-11T00:15:34.123Z","level":"INFO","event":"resource_created","message":"Resource created successfully","payload":"{\"id\":\"123\",\"name\":\"example\"}"}
 ```
 
-> **Not:** `payload` alanı **stringified JSON** (string içinde JSON) olarak yazılır. `extra` alanı ise gerçek nested JSON objesi olarak yazılır; bu sayede OpenSearch'te aranabilir kalır.
+> **Note:** `payload` is written as **stringified JSON** (JSON inside a string).
+> `extra`, on the other hand, is written as a real nested JSON object, so it
+> stays searchable in OpenSearch.
 
-### Paket düzeyinde varsayılan logger
+> **Note:** `trace_id` is written only when it can actually be resolved (see
+> [Distributed Tracing](#distributed-tracing)). No ID is invented.
+
+### Package-level default logger
 
 ```go
-logging.SetDefault(logging.New(logging.WithMinLevel(logging.INFO)))
+gophlog.SetDefault(gophlog.New(gophlog.WithMinLevel(gophlog.INFO)))
 
-logging.Info("Service started", "service_start").Log()
+gophlog.Info("Service started", "service_start").Log()
 ```
 
-## Log Level'ları
+## Log levels
 
-Her level için fluent bir başlangıç metodu vardır:
+Every level has a fluent entry point:
 
 ```go
-log.Trace("Detaylı iz", "trace_event").WithPayload(data).Log()
-log.Debug("Debug bilgisi", "debug_event").WithPayload(data).Log()
-log.Info("Bilgi mesajı", "info_event").WithPayload(data).Log()
-log.Warn("Uyarı mesajı", "warn_event").WithPayload(data).Log()
-log.Error("Hata mesajı", "error_event").WithError(err).Log()
-log.Fatal("Kritik hata", "fatal_event").WithError(err).Log()
+log.Trace("Detailed trace", "trace_event").WithPayload(data).Log()
+log.Debug("Debug information", "debug_event").WithPayload(data).Log()
+log.Info("Informational message", "info_event").WithPayload(data).Log()
+log.Warn("Warning message", "warn_event").WithPayload(data).Log()
+log.Error("Error message", "error_event").WithError(err).Log()
+log.Fatal("Critical failure", "fatal_event").WithError(err).Log()
 ```
 
-`logging.WithMinLevel(...)` ile eşiğin altındaki kayıtlar yazılmaz.
+Records below the threshold set with `gophlog.WithMinLevel(...)` are not written.
 
-## Fluent API (Entry) Metodları
+> ⚠️ **`Fatal` does not terminate the process.** Unlike the standard library's
+> `log.Fatal`, it only writes a record at `FATAL` level; exiting is the caller's
+> decision. Call `os.Exit(1)` explicitly if that is what you want:
+>
+> ```go
+> log.Fatal("Critical failure", "fatal_event").WithError(err).Log()
+> os.Exit(1)
+> ```
+
+### Catching logging failures
+
+When the writer returns an error, or a payload cannot be serialized, the failure
+is not swallowed — `WithOnError` receives it:
+
+```go
+log := gophlog.New(gophlog.WithOnError(func(err error) {
+    // Bump a metric or write to stderr — do not log this with this library
+    // (that recurses).
+    fmt.Fprintln(os.Stderr, "logging failure:", err)
+}))
+```
+
+An unserializable payload also stays visible in the log line itself: the
+`payload` field carries `[unserializable: ...]`, and `error_type` becomes
+`LogSerializationError` unless the caller attached an error of their own.
+
+## Fluent API (Entry) methods
 
 ```go
 log.Info("Message", "event_name").
     Ctx(ctx).                                    // Context (trace/correlation)
-    WithPayload(obj).                            // Payload (struct tag'leri işlenir)
+    WithPayload(obj).                            // Payload (struct tags applied)
     WithPayloadMasked(obj, strategies).          // Payload + field masking
-    WithLogType(logging.LogTypeApp).             // Log type (app/audit/security)
-    WithCategory("category_name").               // Kategori
-    WithError(err).                              // Hata (type/message/stack)
+    WithLogType(gophlog.LogTypeApp).             // Log type (app/audit/security)
+    WithCategory("category_name").               // Category
+    WithError(err).                              // Error (type/message/stack)
     WithTenant("tenant_id").                     // Tenant ID
     WithUser("user_id").                         // User ID
     WithClientIP("192.168.1.1").                 // Client IP
@@ -93,90 +127,92 @@ log.Info("Message", "event_name").
     WithTraceID("...").WithSpanID("...").        // Tracing override
     WithRequestID("...").                        // Request ID
     WithHTTP("GET", "/api/test").                // HTTP method + path
-    WithHTTPResult("GET", "/api/test", 200, 45.5). // HTTP + status + süre
-    WithStatus(200).WithDuration(45.5).          // Tekil HTTP alanları
-    WithQueryParams(map[string]string{...}).     // Query parametreleri
+    WithHTTPResult("GET", "/api/test", 200, 45.5). // HTTP + status + duration
+    WithStatus(200).WithDuration(45.5).          // Individual HTTP fields
+    WithQueryParams(map[string]string{...}).     // Query parameters
     WithBytes(1000, 500).                        // bytes_in / bytes_out
-    WithRequestBody("...").WithResponseBody("..."). // Request/Response body
-    WithIntegration(&logging.IntegrationInfo{...}).         // Integration (tam)
-    WithIntegrationResult("target", status, durMs, retry).  // Integration (kısa)
-    WithQueue(&logging.QueueInfo{...}).                     // Queue (tam)
-    WithQueueMessage("queue", "msgId", retry, ack).         // Queue (kısa)
-    WithJob(&logging.JobInfo{...}).                         // Job (tam)
-    WithJobInfo("name", "schedule", "runId").               // Job (kısa)
-    WithWorkflow("child", "run", "parent").      // workflow id'leri
-    WithExtra(map[string]any{...}).              // Extra alanlar (aranabilir)
-    WithExtraField("key", value).                // Tek extra alan
-    Mask("field", logging.CreditCard).           // Payload içinde field mask
-    MaskMany(map[string]logging.MaskingStrategy{...}).
-    Log()                                        // Kaydı yaz
+    WithRequestBody("...").WithResponseBody("..."). // Request/response body
+    WithIntegration(&gophlog.IntegrationInfo{...}).         // Integration (full)
+    WithIntegrationResult("target", status, durMs, retry).  // Integration (short)
+    WithQueue(&gophlog.QueueInfo{...}).                     // Queue (full)
+    WithQueueMessage("queue", "msgId", retry, ack).         // Queue (short)
+    WithJob(&gophlog.JobInfo{...}).                         // Job (full)
+    WithJobInfo("name", "schedule", "runId").               // Job (short)
+    WithWorkflow("child", "run", "parent").      // Workflow IDs
+    WithExtra(map[string]any{...}).              // Extra fields (searchable)
+    WithExtraField("key", value).                // A single extra field
+    Mask("field", gophlog.CreditCard).           // Mask a field inside the payload
+    MaskMany(map[string]gophlog.MaskingStrategy{...}).
+    Log()                                        // Write the record
 ```
 
-## Child Logger (`With`)
+## Child loggers (`With`)
 
-Aynı alanları her log satırında tekrarlamak yerine `With()` ile bir kez
-bağlayıp türetilmiş bir logger kullanın. Modül/servis bazlı sabit bağlam için
-idealdir; istek bazlı alanlar için context propagation'ı kullanmaya devam edin.
+Instead of repeating the same fields on every line, bind them once with `With()`
+and use the derived logger. This suits per-module or per-service context; keep
+using context propagation for per-request fields.
 
 ```go
-// Uygulama açılışında, modül başına bir kez:
+// Once per module, at start-up:
 payLog := log.With().
     Category("payments").
-    LogType(logging.LogTypeAudit).
+    LogType(gophlog.LogTypeAudit).
     ExtraField("service", "billing").
-    Mask("cardNumber", logging.CreditCard). // bu logger'daki tüm payload'lara uygulanır
+    Mask("cardNumber", gophlog.CreditCard). // applies to every payload on this logger
     Logger()
 
-// Sonrasında her yerde:
+// Everywhere else:
 payLog.Info("Payment charged", "payment_charged").WithPayload(p).Log()
 payLog.Error("Payment failed", "payment_failed").WithError(err).Log()
 ```
 
-Bağlanabilen alanlar: `LogType`, `Category`, `Tenant`, `User`, `ClientIP`,
-`Session`, `RequestID`, `Integration`, `Queue`, `Job`, `Extra`/`ExtraField`
-ve `Mask`/`MaskMany`.
+Bindable fields: `LogType`, `Category`, `Tenant`, `User`, `ClientIP`, `Session`,
+`RequestID`, `Integration`, `Queue`, `Job`, `Extra`/`ExtraField` and
+`Mask`/`MaskMany`.
 
-Öncelik sırası: **entry'de açıkça verilen değer > context'ten gelen değer >
-bağlı (bound) değer**. Child logger, parent'ın writer'ını, minimum seviyesini
-ve diğer çekirdek yapılandırmasını paylaşır — `SetMinLevel` tüm aileyi
-etkiler. Child'dan child türetilebilir; `Logger()` çağrısından sonra builder'ı
-genişletmek önceden türetilen logger'ları etkilemez.
+Precedence: **a value set explicitly on the entry > a value from context > a
+bound value**. A child logger shares the parent's writer, minimum level and the
+rest of its core configuration, so `SetMinLevel` affects the whole family.
+Children can derive further children; extending a builder after calling
+`Logger()` does not affect loggers already derived from it.
 
-## Payload Masking
+## Payload masking
 
-### 1. Fluent API ile
+### 1. Through the fluent API
 
 ```go
 log.Info("Resource processed", "resource_processed").
     WithPayload(map[string]any{"cardNumber": "1234567890123456", "amount": 100}).
-    Mask("cardNumber", logging.CreditCard).
+    Mask("cardNumber", gophlog.CreditCard).
     Log()
 
 log.Info("Record updated", "record_updated").
     WithPayload(map[string]any{"nationalId": "12345678901", "phone": "5551234567"}).
-    MaskMany(map[string]logging.MaskingStrategy{
-        "nationalId": logging.ShowFirst2AndLast2,
-        "phone":      logging.ShowLast2,
+    MaskMany(map[string]gophlog.MaskingStrategy{
+        "nationalId": gophlog.ShowFirst2AndLast2,
+        "phone":      gophlog.ShowLast2,
     }).
     Log()
 ```
 
-### 2. Struct Tag ile (`mask` / `logextra`)
+### 2. Through struct tags (`mask` / `logextra`)
 
-Hassas alanlar struct tag'leri ile işaretlenir. `WithPayload` bir struct (veya pointer/slice/map) aldığında `mask` ve `logextra` tag'leri **otomatik** işlenir:
+Sensitive fields are marked with struct tags. When `WithPayload` receives a
+struct (or a pointer/slice/map of one), the `mask` and `logextra` tags are
+applied **automatically**:
 
 ```go
 type Request struct {
     Amount   float64 `json:"amount"`
     Currency string  `json:"currency"`
 
-    // İlk 6 / son 4 gösterilir
+    // First 6 and last 4 digits stay visible
     CardNumber string `json:"cardNumber" mask:"creditcard"`
 
-    // Tamamen maskelenir
+    // Hidden entirely
     Password string `json:"password" mask:"hideall"`
 
-    // payload'dan çıkarılıp aranabilir `extra` alanına taşınır
+    // Lifted out of the payload into the searchable `extra` object
     RefID string `json:"refId" logextra:"true"`
 }
 
@@ -185,101 +221,139 @@ log.Info("Request processed", "request_processed").
     Log()
 ```
 
-- `mask:"..."` → alan değeri yerinde maskelenir.
-- `logextra:"true"` → alan payload'dan **çıkarılır** ve `extra` objesine (alanın JSON adıyla) taşınır.
+- `mask:"..."` → the field value is masked in place.
+- `logextra:"true"` → the field is **removed** from the payload and moved into
+  the `extra` object under its JSON name.
 
-### 3. Masking Stratejileri
+Payload rendering matches `encoding/json` exactly: `json:"-"` is skipped,
+`omitempty` drops empty fields, untagged embedded struct fields are promoted to
+the parent object, and a `nil` embedded pointer produces no field at all.
 
-| Strateji | Sabit | Örnek (`12345678932`) |
-|----------|-------|------------------------|
-| Tamamını gizle | `logging.HideAll` / `MaskAll` | `********` |
-| İlk 1 | `logging.ShowFirst1` | `1********` |
-| Son 1 | `logging.ShowLast1` | `**********2` |
-| İlk 2 | `logging.ShowFirst2` | `12********` |
-| Son 2 | `logging.ShowLast2` | `*********32` |
-| İlk 1 + Son 1 | `logging.ShowFirst1AndLast1` | `1********2` |
-| İlk 2 + Son 2 | `logging.ShowFirst2AndLast2` | `12*******32` |
-| Kredi kartı | `logging.CreditCard` | `5101 52 **** ** 4582` |
+### 3. Masking strategies
 
-> Tam gizleme (`hideall`) stratejisinde maskelenen kısım 8 yıldızla sınırlanır; böylece çıktı sırrın uzunluğunu ele vermez.
+| Strategy | Constant | Example (`12345678932`) |
+|----------|----------|-------------------------|
+| Hide everything | `gophlog.HideAll` | `********` |
+| First 1 | `gophlog.ShowFirst1` | `1********` |
+| Last 1 | `gophlog.ShowLast1` | `**********2` |
+| First 2 | `gophlog.ShowFirst2` | `12********` |
+| Last 2 | `gophlog.ShowLast2` | `*********32` |
+| First 1 + last 1 | `gophlog.ShowFirst1AndLast1` | `1********2` |
+| First 2 + last 2 | `gophlog.ShowFirst2AndLast2` | `12*******32` |
+| Credit card | `gophlog.CreditCard` | `5101 52 **** ** 4582` |
 
-## HTTP Server Middleware
+`gophlog.MaskAll` is a deprecated older name carrying the same value as
+`HideAll`; use `HideAll` in new code.
 
-Tüm HTTP istek/yanıtlarını otomatik loglar (`net/http`, `chi`, `gin`'in `http.Handler` adaptörü vb. ile uyumlu).
+> **Every strategy is fail-closed.** If a value is too short for the strategy to
+> hide anything, **all** of it is masked rather than left exposed — for example
+> `ShowLast2("42")` → `**` and `ShowLast1("5")` → `*`. Likewise `CreditCard`
+> hides values shorter than 12 digits entirely, since those cannot be real cards.
+
+> With the hide-everything strategy (`hideall`) the masked run is capped at eight
+> asterisks, so the output does not reveal the length of the secret.
+
+## HTTP server middleware
+
+Logs every HTTP request and response automatically. Works with `net/http`,
+`chi`, `gin`'s `http.Handler` adapter and anything else built on `http.Handler`.
 
 ```go
-import "github.com/mustafakarakulak/go-logging/middleware"
+import "github.com/mustafakarakulak/gophlog/middleware"
 
 mw := middleware.New(middleware.Options{
-    Logger:          logging.Default(),
-    LogRequestBody:  true,
-    LogResponseBody: true,
+    Logger:          gophlog.Default(),
     MaxBodySize:     100 * 1024,          // 100 KB
-    SuccessLogLevel: logging.INFO,        // 2xx, 3xx
-    ErrorLogLevel:   logging.ERROR,       // 4xx, 5xx
+    SuccessLogLevel: gophlog.INFO,        // 2xx, 3xx
+    ErrorLogLevel:   gophlog.ERROR,       // 4xx, 5xx
     EventName:       "http_request",
     IncludePaths:    []string{"/api/*"},
     ExcludePaths:    []string{"/health", "/metrics", "/swagger/*"},
-    MaskFieldStrategies: map[string]logging.MaskingStrategy{
-        "cardNumber": logging.CreditCard,
-        "nationalId": logging.ShowFirst2AndLast2,
+    MaskFieldStrategies: map[string]gophlog.MaskingStrategy{
+        "cardNumber": gophlog.CreditCard,
+        "nationalId": gophlog.ShowFirst2AndLast2,
     },
-    LogExtraFields: []string{"externalId"}, // JSON alanlarını extra'ya taşır
+    LogExtraFields: []string{"externalId"}, // lifts JSON fields into extra
 })
 
 mux := http.NewServeMux()
-// ... handler'lar
+// ... handlers
 http.ListenAndServe(":8080", mw(mux))
 ```
 
-Otomatik yakalanan bilgiler: HTTP method/path/status, süre (ms), request/response body, query parametreleri, client IP (`X-Forwarded-For` / `X-Real-IP`), bytes in/out, correlation ID ve workflow header'ları.
+Captured automatically: HTTP method/path/status, duration in milliseconds,
+request and response bodies, query parameters, client IP (`X-Forwarded-For` /
+`X-Real-IP`), bytes in/out, the correlation ID and the workflow headers.
 
-`middleware.NewDefault()` ile varsayılan ayarlarla (body capture açık) hızlıca kullanılabilir.
+**Body capture is on by default**; turn it off with `DisableRequestBody` /
+`DisableResponseBody`. `middleware.NewDefault()`
+(= `middleware.New(middleware.Options{})`) gets you going with the defaults.
 
-## Giden HTTP Çağrıları (HTTP Client)
+The incoming `X-Correlation-ID` header is client-controlled, so it is validated
+(at most 128 characters, `[A-Za-z0-9._:-]`); an invalid value is discarded and a
+fresh ID is generated. A client cannot steer the `trace_id` in your audit logs.
+If you are not behind a trusted proxy, set `DisableForwardedHeaders: true` —
+otherwise `X-Forwarded-For` / `X-Real-IP` can be spoofed.
 
-Giden tüm istekleri loglayan bir `http.RoundTripper`:
+## Outbound HTTP calls (HTTP client)
+
+An `http.RoundTripper` that logs every outbound request:
 
 ```go
-import "github.com/mustafakarakulak/go-logging/httpclient"
+import "github.com/mustafakarakulak/gophlog/httpclient"
 
 client := httpclient.NewClient(nil, httpclient.Options{
-    Logger:          logging.Default(),
-    LogRequestBody:  true,
-    LogResponseBody: true,
-    EventName:       "external_api_request",
-    IncludeURLs:     []string{"https://api.example.com/v1/*"},
-    ExcludeURLs:     []string{"https://api.example.com/health"},
-    MaskFieldStrategies: map[string]logging.MaskingStrategy{
-        "cardNumber": logging.CreditCard,
-        "password":   logging.HideAll,
+    Logger:      gophlog.Default(),
+    EventName:   "external_api_request",
+    IncludeURLs: []string{"https://api.example.com/v1/*"},
+    ExcludeURLs: []string{"https://api.example.com/health"},
+    MaskFieldStrategies: map[string]gophlog.MaskingStrategy{
+        "cardNumber": gophlog.CreditCard,
+        "password":   gophlog.HideAll,
     },
     LogExtraFields: []string{"refId"},
-    LogCurl:        false, // true → her istek için eşdeğer curl komutu yazılır (varsayılan os.Stderr;
-                          //         CurlWriter ile yönlendirilebilir — stdout JSON akışı temiz kalır)
+    LogCurl:        false, // true → writes an equivalent curl command per request
+                          //        (os.Stderr by default; redirect it with CurlWriter
+                          //        to keep the stdout JSON stream clean)
 })
 
-// Correlation ID context üzerinden otomatik propagate edilir (X-Correlation-ID).
-ctx := logging.WithCorrelationID(context.Background(), "cid-123")
+// The correlation ID propagates automatically from context (X-Correlation-ID).
+ctx := gophlog.WithCorrelationID(context.Background(), "cid-123")
 req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
 resp, err := client.Do(req)
 ```
 
-- Başarılı çağrılar `SuccessLogLevel`, 4xx/5xx ve transport hataları `ErrorLogLevel` ile loglanır.
-- Timeout / bağlantı hatalarında `http_status: 0` ve `<event>_exception` event adıyla log üretilir.
-- Mevcut bir `*http.Client`'ı sarmak için `httpclient.NewClient(existing, opts)` kullanın.
+- Successful calls are logged at `SuccessLogLevel`; 4xx/5xx responses and
+  transport errors at `ErrorLogLevel`.
+- Timeouts and connection errors produce a record with `http_status: 0` and the
+  event name `<event>_exception`.
+- Wrap an existing `*http.Client` with `httpclient.NewClient(existing, opts)`.
+- Body capture is on by default; turn it off with `DisableRequestBody` /
+  `DisableResponseBody`.
+- In the `LogCurl` output, credential-bearing headers (`Authorization`,
+  `Cookie`, `X-Api-Key`, …) are replaced with `[REDACTED]` and the body is
+  written masked. The command is therefore not runnable as-is — that is a
+  deliberate trade. Any other header named in `MaskFieldStrategies` is masked
+  with the corresponding strategy.
 
 ## Distributed Tracing
 
-`trace_id` şu sırayla çözülür:
+`trace_id` is resolved in this order:
 
-1. `Entry.WithTraceID(...)` ile verilen açık değer
-2. Context'teki correlation ID (`logging.WithCorrelationID`)
-3. `WithTraceExtractor` ile verilen fonksiyon (ör. OpenTelemetry adaptörü)
-4. Yeni üretilen 32 karakterlik hex ID
+1. An explicit value passed to `Entry.WithTraceID(...)`
+2. The correlation ID in context (`gophlog.WithCorrelationID`)
+3. The function supplied through `WithTraceExtractor` (an OpenTelemetry adapter,
+   for example)
+4. If none of those apply, the field is **not written**
+
+Not inventing an ID is deliberate: stamping two unrelated lines with two
+different "traces" inflates `trace_id` cardinality and makes OpenSearch return
+traces that never existed. The right approach is to generate one correlation ID
+per request and carry it in context — which the HTTP middleware already does.
+If you need the old behaviour, enable it with `gophlog.WithAutoTraceID()`.
 
 ```go
-log := logging.New(logging.WithTraceExtractor(func(ctx context.Context) (traceID, spanID string) {
+log := gophlog.New(gophlog.WithTraceExtractor(func(ctx context.Context) (traceID, spanID string) {
     span := trace.SpanFromContext(ctx)
     sc := span.SpanContext()
     if sc.HasTraceID() {
@@ -289,50 +363,65 @@ log := logging.New(logging.WithTraceExtractor(func(ctx context.Context) (traceID
 }))
 ```
 
-Context yardımcıları: `WithCorrelationID`, `WithSpanID`, `WithRequestID`, `WithTenantID`, `WithUserID`, `WithClientIP`, `WithSessionID`, `WithWorkflow`.
+Context helpers: `WithCorrelationID`, `WithSpanID`, `WithRequestID`,
+`WithTenantID`, `WithUserID`, `WithClientIP`, `WithSessionID`, `WithWorkflow`.
 
-## log/slog Entegrasyonu
+## log/slog integration
 
-Standart `log/slog` API'si ile yazılmış kodu bu kütüphanenin JSON formatına köprülemek için bir `slog.Handler` adaptörü vardır. Mevcut `slog` tabanlı kodu değiştirmeden bu loglama altyapısına geçebilirsiniz.
+A `slog.Handler` adapter bridges code written against the standard `log/slog`
+API onto this library's JSON format, so you can move existing `slog`-based code
+onto this logging stack without changing it.
 
 ```go
-base := logging.New(logging.WithMinLevel(logging.INFO))
-logger := logging.NewSlogLogger(base, nil) // *slog.Logger
+base := gophlog.New(gophlog.WithMinLevel(gophlog.INFO))
+logger := gophlog.NewSlogLogger(base, nil) // *slog.Logger
 slog.SetDefault(logger)
 
 slog.Info("user created",
-    "event", "user_created", // "event" alanına taşınır
+    "event", "user_created", // lifted into the "event" field
     "user_id", "u-123",
     slog.Group("db", "rows", 5, "table", "users"),
 )
 ```
 
-Davranış:
+Behaviour:
 
-- **Seviye eşleme:** slog seviyeleri altı seviyeye genişletilir (Debug→`DEBUG`, Info→`INFO`, Warn→`WARN`, Error→`ERROR`; `LevelError+4` ve üzeri → `FATAL`, `LevelDebug` altı → `TRACE`).
-- **Attribute'lar:** aranabilir `extra` objesine yazılır; `WithGroup`/`slog.Group` nested obje olarak korunur.
-- **Hatalar:** `error` değeri taşıyan attribute'lar `{}` yerine `.Error()` string'i olarak yazılır.
-- **`event` eşlemesi:** `EventKey` (varsayılan `"event"`) ile bir attribute `event` alanına taşınır; `SlogOptions{EventKey: ""}` ile kapatılır.
-- **Kaynak konumu:** `SlogOptions{AddSource: true}` ile çağıran `function`/`file`/`line` bilgisi `extra.source` altına eklenir (slog logger'ının `AddSource` ile oluşturulmuş olması gerekir).
+- **Level mapping:** slog levels expand to the six levels here (Debug→`DEBUG`,
+  Info→`INFO`, Warn→`WARN`, Error→`ERROR`; `LevelError+4` and above → `FATAL`,
+  below `LevelDebug` → `TRACE`).
+- **Attributes:** written into the searchable `extra` object;
+  `WithGroup`/`slog.Group` is preserved as a nested object.
+- **Errors:** attributes holding an `error` value are written as their
+  `.Error()` string rather than as `{}`.
+- **`event` mapping:** `EventKey` (default `"event"`) lifts one attribute into
+  the `event` field; `SlogOptions{DisableEventKey: true}` turns that off. An
+  empty `EventKey` falls back to the default, so `SlogOptions{AddSource: true}`
+  does not disable the mapping by accident.
+- **Source location:** `SlogOptions{AddSource: true}` adds the caller's
+  `function`/`file`/`line` under `extra.source` (the slog logger itself must
+  have been created with `AddSource`).
 
-Adaptör resmî `testing/slogtest` paketini, formatın `timestamp` alanını her zaman üretmesi (sıfır `Record.Time` kuralı) dışında geçer.
+The adapter passes the official `testing/slogtest` suite, except that this
+format always emits a `timestamp` field (the zero-`Record.Time` rule).
 
-## JSON Çıktı Formatı
+## JSON output format
 
-### Basit log
+### A simple record
 
 ```json
 {
   "timestamp": "2026-01-11T00:15:34.123Z",
   "level": "INFO",
-  "trace_id": "b7f5e0b3b78b4b0fb2df8e5a9c3e22e5",
   "event": "resource_created",
   "message": "Resource created successfully",
   "payload": "{\"id\":\"123\",\"name\":\"example\"}"
 }
 ```
 
-### Integration log
+When a correlation ID is resolved from context, the line also carries
+`"trace_id": "b7f5e0b3..."`.
+
+### An integration record
 
 ```json
 {
@@ -351,101 +440,123 @@ Adaptör resmî `testing/slogtest` paketini, formatın `timestamp` alanını her
 }
 ```
 
-### Alan açıklamaları
+### Field reference
 
-| Alan | Tip | Açıklama |
-|------|-----|----------|
-| `timestamp` | string (ISO-8601) | UTC zaman damgası |
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp` | string (ISO-8601) | UTC timestamp |
 | `level` | string | TRACE/DEBUG/INFO/WARN/ERROR/FATAL |
 | `log_type` | string? | app / audit / security |
-| `category` | string? | Log kategorisi |
-| `trace_id` | string | Distributed tracing ID |
+| `category` | string? | Log category |
+| `trace_id` | string? | Distributed tracing ID (omitted when unresolved) |
 | `span_id` | string? | Span ID |
 | `request_id` | string? | Request ID |
-| `tenant_id`, `user_id`, `client_ip`, `session_id` | string? | Kimlik/oturum bilgileri |
+| `tenant_id`, `user_id`, `client_ip`, `session_id` | string? | Identity and session data |
 | `http_method`, `http_path` | string? | HTTP method / path |
-| `query_params` | object? | Query parametreleri |
+| `query_params` | object? | Query parameters |
 | `http_status` | number? | HTTP status code |
-| `duration_ms` | number? | Süre (ms) |
-| `bytes_in`, `bytes_out` | number? | Byte sayıları |
-| `request_body`, `response_body` | string? | Request/Response body |
-| `event` | string | Event adı |
-| `message` | string | Log mesajı |
+| `duration_ms` | number? | Duration in milliseconds |
+| `bytes_in`, `bytes_out` | number? | Byte counts |
+| `request_body`, `response_body` | string? | Request/response body |
+| `event` | string | Event name |
+| `message` | string | Log message |
 | `payload` | string? | Stringified JSON payload |
-| `error_type`, `error_message`, `stack_trace` | string? | Hata bilgileri (stack max 3000 char) |
+| `error_type`, `error_message`, `stack_trace` | string? | Error details (stack capped at 3000 chars + truncation marker) |
 | `integration`, `queue`, `job` | object? | Domain context |
-| `child_workflow_id`, `run_id`, `parent_workflow_id` | string? | workflow id'leri |
-| `extra` | object? | Aranabilir ekstra alanlar |
+| `child_workflow_id`, `run_id`, `parent_workflow_id` | string? | Workflow IDs |
+| `extra` | object? | Searchable extra fields |
 | `kubernetes` | object? | Kubernetes metadata |
 
-## Kubernetes & FluentBit
+## Kubernetes and FluentBit
 
-Kütüphane stdout'a temiz JSON yazdığı için Kubernetes log toplama ile sorunsuz çalışır. Pod metadata'sını eklemek için:
+Because the library writes clean JSON to stdout, it drops straight into
+Kubernetes log collection. To attach pod metadata:
 
 ```go
-// POD_NAME / POD_NAMESPACE / NODE_NAME / CONTAINER_NAME env değişkenlerinden
-log := logging.New(logging.WithKubernetesFromEnv())
+// From the POD_NAME / POD_NAMESPACE / NODE_NAME / CONTAINER_NAME env vars
+log := gophlog.New(gophlog.WithKubernetesFromEnv())
 
-// veya statik
-log := logging.New(logging.WithKubernetes(&logging.KubernetesInfo{
+// Or statically
+log := gophlog.New(gophlog.WithKubernetes(&gophlog.KubernetesInfo{
     PodName: "my-pod", Namespace: "prod",
 }))
 ```
 
-FluentBit örnek konfigürasyonu için JSON parser + OpenSearch output kullanın (alanlar düz olduğu için ek dönüşüm gerekmez).
+For FluentBit, a JSON parser plus an OpenSearch output is enough — the fields
+are flat, so no extra transformation is needed.
 
-## Enum / Sabitler
+## Enums and constants
 
 ```go
 // Level
-logging.TRACE, logging.DEBUG, logging.INFO, logging.WARN, logging.ERROR, logging.FATAL
+gophlog.TRACE, gophlog.DEBUG, gophlog.INFO, gophlog.WARN, gophlog.ERROR, gophlog.FATAL
 
 // LogType
-logging.LogTypeApp, logging.LogTypeAudit, logging.LogTypeSecurity
+gophlog.LogTypeApp, gophlog.LogTypeAudit, gophlog.LogTypeSecurity
 
 // IntegrationStatus
-logging.IntegrationSuccess, logging.IntegrationFail, logging.IntegrationTimeout, logging.IntegrationRetry
+gophlog.IntegrationSuccess, gophlog.IntegrationFail, gophlog.IntegrationTimeout, gophlog.IntegrationRetry
 
-// MaskingStrategy
-logging.HideAll, logging.MaskAll, logging.ShowFirst1, logging.ShowLast1,
-logging.ShowFirst2, logging.ShowLast2, logging.ShowFirst1AndLast1,
-logging.ShowFirst2AndLast2, logging.CreditCard
+// MaskingStrategy (MaskAll = HideAll, deprecated)
+gophlog.HideAll, gophlog.ShowFirst1, gophlog.ShowLast1,
+gophlog.ShowFirst2, gophlog.ShowLast2, gophlog.ShowFirst1AndLast1,
+gophlog.ShowFirst2AndLast2, gophlog.CreditCard
 ```
 
-## Best Practices
+## Version policy
 
-- **Event adları**: tutarlı ve aranabilir: `resource_created`, `request_processed`, `user_login_failed` (`{entity}_{action}`).
-- **Payload**: önemli iş context'ini tutun; büyük veri setlerinden kaçının; hassas verileri mutlaka maskeleyin.
-- **Masking**: kart numarası için `CreditCard`, kimlik numarası için `ShowFirst2AndLast2`, parola/token için `HideAll` (veya hiç loglamayın).
-- **Extra**: OpenSearch'te aramak istediğiniz alanları `logextra:"true"` veya middleware `LogExtraFields` ile `extra`'ya taşıyın.
-- **Tracing**: HTTP girişinde correlation ID üretip context ile taşıyın; giden çağrılarda transport bunu otomatik propagate eder.
+Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+From `v1.0.0` onwards the exported API (types, functions and JSON field names)
+stays backward compatible throughout the v1 series; breaking changes only ship
+in a new major version. Packages under `internal/` are excluded from that
+guarantee.
 
-## Test
+## Security
+
+Masking is fail-closed by design, and credential-bearing HTTP headers are
+redacted in the curl dump. If you find a leak or a bypassed mask, please do not
+open a public issue — see [SECURITY.md](SECURITY.md) for the reporting flow and
+what is in scope.
+
+## Best practices
+
+- **Event names**: keep them consistent and searchable — `resource_created`,
+  `request_processed`, `user_login_failed` (`{entity}_{action}`).
+- **Payload**: carry the business context that matters; avoid large data sets;
+  always mask sensitive values.
+- **Masking**: `CreditCard` for card numbers, `ShowFirst2AndLast2` for national
+  IDs, `HideAll` for passwords and tokens — or do not log them at all.
+- **Extra**: move the fields you want to search in OpenSearch into `extra`, via
+  `logextra:"true"` or the middleware's `LogExtraFields`.
+- **Tracing**: generate a correlation ID at the HTTP boundary and carry it in
+  context; the transport propagates it on outbound calls automatically.
+
+## Tests
 
 ```bash
 go test ./...
 go run ./examples
 ```
 
-## Performans
+## Performance
 
-Sıcak yollar için benchmark'lar `benchmark_test.go` içinde tanımlıdır. Kendi
-donanımınızda ölçmek için:
+Benchmarks for the hot paths live in `benchmark_test.go`. To measure on your own
+hardware:
 
 ```bash
 go test -bench . -benchmem -run '^$'
 ```
 
-Sayılar donanıma ve Go sürümüne göre değişir; bu yüzden mutlak değerler yerine
-`allocs/op` metriğine bakmak daha anlamlıdır. Kapalı (filtrelenen) seviyedeki bir
-log çağrısı sıfır allocation yapacak şekilde tasarlanmıştır, dolayısıyla yüksek
-hacimli `Debug`/`Trace` loglaması pratikte bedavadır.
+The numbers vary with hardware and Go version, so `allocs/op` is more meaningful
+than absolute timings. A log call at a filtered-out level is designed to allocate
+nothing, which makes high-volume `Debug`/`Trace` logging effectively free.
 
-## Gereksinimler
+## Requirements
 
 - Go 1.23+
-- Çekirdek paket yalnızca standart kütüphaneye bağlıdır (sıfır dış bağımlılık).
+- The core package depends only on the standard library (zero external
+  dependencies).
 
-## Lisans
+## License
 
-MIT — bkz. [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
