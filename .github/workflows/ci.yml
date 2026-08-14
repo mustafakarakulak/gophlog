@@ -5,16 +5,21 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Weekly, so a newly published advisory is reported even with no commits.
+    - cron: '0 6 * * 1'
 
 permissions:
   contents: read
 
 jobs:
   test:
-    name: Test (Go ${{ matrix.go }})
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }}, Go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
         go: ['1.23', 'stable']
     steps:
       - name: Checkout
@@ -24,6 +29,34 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
+          check-latest: true
+
+      - name: Build
+        run: go build ./...
+
+      # The race detector needs a C toolchain that is not guaranteed on every
+      # runner image. Data races are not platform-specific, so it runs on Linux
+      # only; the other platforms exercise the parts that do differ — host/port
+      # splitting, file paths in stack traces and line endings.
+      - name: Test (race + coverage)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Test
+        if: matrix.os != 'ubuntu-latest'
+        run: go test ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
           check-latest: true
 
       - name: Verify gofmt
@@ -38,8 +71,25 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - name: Build
-        run: go build ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.12.2
 
-      - name: Test (race + coverage)
-        run: go test -race -coverprofile=coverage.out ./...
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

@@ -1,0 +1,23 @@
+version: "2"
+
+linters:
+  # The default set: errcheck, govet, ineffassign, staticcheck, unused.
+  # errcheck and staticcheck are the two that earn their keep here — errcheck
+  # catches swallowed error returns (a v1.0.0 fix was exactly that class), and
+  # staticcheck flags use of symbols marked Deprecated, such as MaskAll.
+  #
+  # No exclusion presets: the common "std-error-handling" preset would waive
+  # errcheck on Write, Close and Fprint*, which is precisely what this library
+  # needs checked. Ignoring an error stays possible, but has to be written out
+  # as `_ =` at the call site so the choice is visible in review.
+  default: standard
+
+  settings:
+    govet:
+      disable:
+        # Suggests inlining stdlib constants and functions from the toolchain in
+        # use, which conflicts with the go 1.23 directive in go.mod.
+        - inline
+
+  exclusions:
+    generated: lax
