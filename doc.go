@@ -15,7 +15,7 @@
 //
 // # Quick start
 //
-//	log := logging.New()
+//	log := gophlog.New()
 //	log.Info("Invoice created", "invoice_created").
 //	    WithPayload(map[string]any{"invoice_id": "INV-001", "amount": 1000.0}).
 //	    Log()
@@ -30,4 +30,4 @@
 //
 // `creditCard` is masked in place; `txnId` is moved into the searchable
 // `extra` object.
-package logging
+package gophlog

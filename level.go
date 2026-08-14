@@ -1,4 +1,4 @@
-package logging
+package gophlog
 
 // Level represents the severity of a log entry.
 //

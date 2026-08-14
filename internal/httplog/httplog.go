@@ -13,7 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	logging "github.com/mustafakarakulak/go-logging"
+	"github.com/mustafakarakulak/gophlog"
 )
 
 // CaptureBody reads at most max+1 bytes from body for logging while preserving
@@ -127,18 +127,18 @@ func CapBody(body string, max int) string {
 // strategy (case-insensitive). Keys without a matching strategy are left
 // untouched. It is used to keep secrets (tokens, passwords) in query strings
 // from being logged in clear text.
-func MaskQueryValues(q url.Values, strategies map[string]logging.MaskingStrategy) {
+func MaskQueryValues(q url.Values, strategies map[string]gophlog.MaskingStrategy) {
 	if len(q) == 0 || len(strategies) == 0 {
 		return
 	}
-	lower := make(map[string]logging.MaskingStrategy, len(strategies))
+	lower := make(map[string]gophlog.MaskingStrategy, len(strategies))
 	for k, s := range strategies {
 		lower[strings.ToLower(k)] = s
 	}
 	for key, vals := range q {
 		if s, ok := lower[strings.ToLower(key)]; ok {
 			for i := range vals {
-				vals[i] = logging.MaskString(vals[i], s)
+				vals[i] = gophlog.MaskString(vals[i], s)
 			}
 		}
 	}
@@ -148,7 +148,7 @@ func MaskQueryValues(q url.Values, strategies map[string]logging.MaskingStrategy
 // whose keys match a strategy, and re-encodes it. The original body is returned
 // unchanged when it does not parse as a form. This closes the gap where masking
 // only covered JSON bodies.
-func MaskFormBody(body string, strategies map[string]logging.MaskingStrategy) (string, bool) {
+func MaskFormBody(body string, strategies map[string]gophlog.MaskingStrategy) (string, bool) {
 	values, err := url.ParseQuery(body)
 	if err != nil || len(values) == 0 {
 		return body, false

@@ -1,5 +1,5 @@
 // Package middleware provides net/http server middleware that automatically
-// logs every HTTP request/response using github.com/mustafakarakulak/go-logging.
+// logs every HTTP request/response using github.com/mustafakarakulak/gophlog.
 //
 // It captures the request/response bodies, duration, status, client IP, query
 // parameters and workflow headers, applies field masking, and emits a single
@@ -16,14 +16,14 @@ import (
 	"strings"
 	"time"
 
-	logging "github.com/mustafakarakulak/go-logging"
-	"github.com/mustafakarakulak/go-logging/internal/httplog"
+	"github.com/mustafakarakulak/gophlog"
+	"github.com/mustafakarakulak/gophlog/internal/httplog"
 )
 
 // Options configures the request-logging middleware.
 type Options struct {
-	// Logger is the logger to use. Defaults to logging.Default().
-	Logger *logging.Logger
+	// Logger is the logger to use. Defaults to gophlog.Default().
+	Logger *gophlog.Logger
 
 	// LogRequestBody / LogResponseBody toggle body capture. Default: true.
 	LogRequestBody  bool
@@ -34,16 +34,16 @@ type Options struct {
 
 	// MaskFieldStrategies masks named JSON fields in request/response bodies
 	// (case-insensitive, applied recursively).
-	MaskFieldStrategies map[string]logging.MaskingStrategy
+	MaskFieldStrategies map[string]gophlog.MaskingStrategy
 
 	// LogExtraFields lifts the named JSON fields out of the bodies and into the
 	// searchable `extra` object (keyed request_<field> / response_<field>).
 	LogExtraFields []string
 
 	// SuccessLogLevel is used for 2xx/3xx. Default: INFO.
-	SuccessLogLevel logging.Level
+	SuccessLogLevel gophlog.Level
 	// ErrorLogLevel is used for 4xx/5xx. Default: ERROR.
-	ErrorLogLevel logging.Level
+	ErrorLogLevel gophlog.Level
 
 	// EventName overrides the event name. Default: "http_request".
 	EventName string
@@ -66,16 +66,16 @@ type Options struct {
 
 func (o *Options) applyDefaults() {
 	if o.Logger == nil {
-		o.Logger = logging.Default()
+		o.Logger = gophlog.Default()
 	}
 	if o.MaxBodySize == 0 {
 		o.MaxBodySize = 100 * 1024
 	}
 	if o.SuccessLogLevel == "" {
-		o.SuccessLogLevel = logging.INFO
+		o.SuccessLogLevel = gophlog.INFO
 	}
 	if o.ErrorLogLevel == "" {
-		o.ErrorLogLevel = logging.ERROR
+		o.ErrorLogLevel = gophlog.ERROR
 	}
 	if o.EventName == "" {
 		o.EventName = "http_request"
@@ -111,18 +111,18 @@ func handle(opts Options, next http.Handler, w http.ResponseWriter, r *http.Requ
 
 	// Resolve / propagate correlation ID and workflow headers via context.
 	ctx := r.Context()
-	correlationID := r.Header.Get(logging.CorrelationHeader)
+	correlationID := r.Header.Get(gophlog.CorrelationHeader)
 	if correlationID == "" {
-		correlationID = logging.NewCorrelationID()
+		correlationID = gophlog.NewCorrelationID()
 	}
-	ctx = logging.WithCorrelationID(ctx, correlationID)
-	ctx = logging.WithWorkflow(ctx,
-		r.Header.Get(logging.HeaderChildWorkflowID),
-		r.Header.Get(logging.HeaderRunID),
-		r.Header.Get(logging.HeaderParentWorkflowID),
+	ctx = gophlog.WithCorrelationID(ctx, correlationID)
+	ctx = gophlog.WithWorkflow(ctx,
+		r.Header.Get(gophlog.HeaderChildWorkflowID),
+		r.Header.Get(gophlog.HeaderRunID),
+		r.Header.Get(gophlog.HeaderParentWorkflowID),
 	)
 	if ip := clientIP(r, !opts.DisableForwardedHeaders); ip != "" {
-		ctx = logging.WithClientIP(ctx, ip)
+		ctx = gophlog.WithClientIP(ctx, ip)
 	}
 	r = r.WithContext(ctx)
 
@@ -253,7 +253,7 @@ func processBody(body, contentType string, opts Options, isRequest bool, extra m
 	}
 
 	if len(opts.MaskFieldStrategies) > 0 {
-		decoded = logging.MaskJSON(decoded, opts.MaskFieldStrategies)
+		decoded = gophlog.MaskJSON(decoded, opts.MaskFieldStrategies)
 	}
 
 	out, err := json.Marshal(decoded)

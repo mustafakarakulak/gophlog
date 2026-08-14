@@ -1,4 +1,4 @@
-package logging
+package gophlog
 
 // IntegrationInfo holds metadata about an external integration call.
 //

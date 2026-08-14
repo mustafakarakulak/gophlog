@@ -1,4 +1,4 @@
-package logging
+package gophlog
 
 import (
 	"encoding/json"

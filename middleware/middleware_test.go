@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	logging "github.com/mustafakarakulak/go-logging"
+	"github.com/mustafakarakulak/gophlog"
 )
 
 func parseLine(t *testing.T, buf *bytes.Buffer) map[string]any {
@@ -24,13 +24,13 @@ func parseLine(t *testing.T, buf *bytes.Buffer) map[string]any {
 
 func TestMiddlewareLogsRequest(t *testing.T) {
 	var buf bytes.Buffer
-	log := logging.New(logging.WithWriter(&buf))
+	log := gophlog.New(gophlog.WithWriter(&buf))
 
 	mw := New(Options{
 		Logger:              log,
 		LogRequestBody:      true,
 		LogResponseBody:     true,
-		MaskFieldStrategies: map[string]logging.MaskingStrategy{"password": logging.HideAll},
+		MaskFieldStrategies: map[string]gophlog.MaskingStrategy{"password": gophlog.HideAll},
 		EventName:           "http_request",
 	})
 
@@ -79,10 +79,10 @@ func TestMiddlewareLogsRequest(t *testing.T) {
 
 func TestMiddlewareMasksQueryParams(t *testing.T) {
 	var buf bytes.Buffer
-	log := logging.New(logging.WithWriter(&buf))
+	log := gophlog.New(gophlog.WithWriter(&buf))
 	mw := New(Options{
 		Logger:              log,
-		MaskFieldStrategies: map[string]logging.MaskingStrategy{"token": logging.HideAll},
+		MaskFieldStrategies: map[string]gophlog.MaskingStrategy{"token": gophlog.HideAll},
 	})
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -106,11 +106,11 @@ func TestMiddlewareMasksQueryParams(t *testing.T) {
 
 func TestMiddlewareMasksFormBody(t *testing.T) {
 	var buf bytes.Buffer
-	log := logging.New(logging.WithWriter(&buf))
+	log := gophlog.New(gophlog.WithWriter(&buf))
 	mw := New(Options{
 		Logger:              log,
 		LogRequestBody:      true,
-		MaskFieldStrategies: map[string]logging.MaskingStrategy{"password": logging.HideAll},
+		MaskFieldStrategies: map[string]gophlog.MaskingStrategy{"password": gophlog.HideAll},
 	})
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.ReadAll(r.Body)
@@ -132,7 +132,7 @@ func TestMiddlewareMasksFormBody(t *testing.T) {
 
 func TestMiddlewareDoesNotTruncateHandlerBody(t *testing.T) {
 	var buf bytes.Buffer
-	log := logging.New(logging.WithWriter(&buf))
+	log := gophlog.New(gophlog.WithWriter(&buf))
 	// Tiny MaxBodySize so the body is "too large" for logging.
 	mw := New(Options{Logger: log, LogRequestBody: true, MaxBodySize: 16})
 
@@ -158,7 +158,7 @@ func TestMiddlewareDoesNotTruncateHandlerBody(t *testing.T) {
 
 func TestMiddlewareExcludePaths(t *testing.T) {
 	var buf bytes.Buffer
-	log := logging.New(logging.WithWriter(&buf))
+	log := gophlog.New(gophlog.WithWriter(&buf))
 	mw := New(Options{Logger: log, ExcludePaths: []string{"/health"}})
 
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -191,8 +191,8 @@ func TestClientIPVariants(t *testing.T) {
 
 func TestNewDefaultMiddleware(t *testing.T) {
 	var buf bytes.Buffer
-	logging.SetDefault(logging.New(logging.WithWriter(&buf)))
-	defer logging.SetDefault(logging.New())
+	gophlog.SetDefault(gophlog.New(gophlog.WithWriter(&buf)))
+	defer gophlog.SetDefault(gophlog.New())
 
 	handler := NewDefault()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"ok":true}`))
@@ -206,7 +206,7 @@ func TestNewDefaultMiddleware(t *testing.T) {
 
 func TestResponseRecorderFlushAndUnwrap(t *testing.T) {
 	var buf bytes.Buffer
-	log := logging.New(logging.WithWriter(&buf))
+	log := gophlog.New(gophlog.WithWriter(&buf))
 	mw := New(Options{Logger: log})
 
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -229,7 +229,7 @@ func TestResponseRecorderFlushAndUnwrap(t *testing.T) {
 
 func TestMiddlewareLogExtraFields(t *testing.T) {
 	var buf bytes.Buffer
-	log := logging.New(logging.WithWriter(&buf))
+	log := gophlog.New(gophlog.WithWriter(&buf))
 	mw := New(Options{
 		Logger:         log,
 		LogRequestBody: true,

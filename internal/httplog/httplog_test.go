@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	logging "github.com/mustafakarakulak/go-logging"
+	"github.com/mustafakarakulak/gophlog"
 )
 
 func TestCaptureBodyShort(t *testing.T) {
@@ -118,7 +118,7 @@ func TestCapBody(t *testing.T) {
 
 func TestMaskQueryValues(t *testing.T) {
 	q := url.Values{"token": {"secret"}, "page": {"2"}}
-	MaskQueryValues(q, map[string]logging.MaskingStrategy{"TOKEN": logging.HideAll})
+	MaskQueryValues(q, map[string]gophlog.MaskingStrategy{"TOKEN": gophlog.HideAll})
 	if q.Get("token") == "secret" {
 		t.Errorf("token should be masked: %v", q.Get("token"))
 	}
@@ -134,7 +134,7 @@ func TestMaskQueryValues(t *testing.T) {
 }
 
 func TestMaskFormBody(t *testing.T) {
-	masked, ok := MaskFormBody("user=alice&password=hunter2", map[string]logging.MaskingStrategy{"password": logging.HideAll})
+	masked, ok := MaskFormBody("user=alice&password=hunter2", map[string]gophlog.MaskingStrategy{"password": gophlog.HideAll})
 	if !ok {
 		t.Fatal("valid form should parse")
 	}

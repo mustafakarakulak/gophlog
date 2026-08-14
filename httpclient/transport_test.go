@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	logging "github.com/mustafakarakulak/go-logging"
+	"github.com/mustafakarakulak/gophlog"
 )
 
 func parseLine(t *testing.T, buf *bytes.Buffer) map[string]any {
@@ -25,8 +25,8 @@ func parseLine(t *testing.T, buf *bytes.Buffer) map[string]any {
 
 func TestTransportLogsAndMasks(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(logging.CorrelationHeader) != "cid-123" {
-			t.Errorf("correlation header not propagated: %q", r.Header.Get(logging.CorrelationHeader))
+		if r.Header.Get(gophlog.CorrelationHeader) != "cid-123" {
+			t.Errorf("correlation header not propagated: %q", r.Header.Get(gophlog.CorrelationHeader))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"paymentId":"PAY-1","status":"success"}`))
@@ -34,16 +34,16 @@ func TestTransportLogsAndMasks(t *testing.T) {
 	defer srv.Close()
 
 	var buf bytes.Buffer
-	log := logging.New(logging.WithWriter(&buf))
+	log := gophlog.New(gophlog.WithWriter(&buf))
 	client := NewClient(nil, Options{
 		Logger:              log,
 		LogRequestBody:      true,
 		LogResponseBody:     true,
-		MaskFieldStrategies: map[string]logging.MaskingStrategy{"creditCard": logging.CreditCard},
+		MaskFieldStrategies: map[string]gophlog.MaskingStrategy{"creditCard": gophlog.CreditCard},
 		EventName:           "payment_api_request",
 	})
 
-	ctx := logging.WithCorrelationID(context.Background(), "cid-123")
+	ctx := gophlog.WithCorrelationID(context.Background(), "cid-123")
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/payments",
 		strings.NewReader(`{"amount":100,"creditCard":"1111999988883333"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -81,10 +81,10 @@ func TestTransportDoesNotMutateCallerRequest(t *testing.T) {
 	defer srv.Close()
 
 	var buf bytes.Buffer
-	log := logging.New(logging.WithWriter(&buf))
+	log := gophlog.New(gophlog.WithWriter(&buf))
 	client := NewClient(nil, Options{Logger: log})
 
-	ctx := logging.WithCorrelationID(context.Background(), "cid-xyz")
+	ctx := gophlog.WithCorrelationID(context.Background(), "cid-xyz")
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -93,8 +93,8 @@ func TestTransportDoesNotMutateCallerRequest(t *testing.T) {
 	resp.Body.Close()
 
 	// The caller's request must remain untouched (RoundTripper contract).
-	if req.Header.Get(logging.CorrelationHeader) != "" {
-		t.Errorf("caller request was mutated: %q", req.Header.Get(logging.CorrelationHeader))
+	if req.Header.Get(gophlog.CorrelationHeader) != "" {
+		t.Errorf("caller request was mutated: %q", req.Header.Get(gophlog.CorrelationHeader))
 	}
 }
 
@@ -115,7 +115,7 @@ func TestTransportRedirectReplaysBody(t *testing.T) {
 	defer srv.Close()
 
 	var buf bytes.Buffer
-	log := logging.New(logging.WithWriter(&buf))
+	log := gophlog.New(gophlog.WithWriter(&buf))
 	client := NewClient(nil, Options{Logger: log, LogRequestBody: true})
 
 	const payload = `{"amount":100}`
@@ -143,7 +143,7 @@ func TestTransportLogCurl(t *testing.T) {
 	defer srv.Close()
 
 	var logBuf, curlBuf bytes.Buffer
-	log := logging.New(logging.WithWriter(&logBuf))
+	log := gophlog.New(gophlog.WithWriter(&logBuf))
 	client := NewClient(nil, Options{
 		Logger:         log,
 		LogRequestBody: true,
@@ -176,11 +176,11 @@ func TestTransportMasksFormBody(t *testing.T) {
 	defer srv.Close()
 
 	var buf bytes.Buffer
-	log := logging.New(logging.WithWriter(&buf))
+	log := gophlog.New(gophlog.WithWriter(&buf))
 	client := NewClient(nil, Options{
 		Logger:              log,
 		LogRequestBody:      true,
-		MaskFieldStrategies: map[string]logging.MaskingStrategy{"password": logging.HideAll},
+		MaskFieldStrategies: map[string]gophlog.MaskingStrategy{"password": gophlog.HideAll},
 	})
 
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/login", strings.NewReader("user=alice&password=hunter2"))
@@ -204,10 +204,10 @@ func TestTransportMasksURLQuery(t *testing.T) {
 	defer srv.Close()
 
 	var buf bytes.Buffer
-	log := logging.New(logging.WithWriter(&buf))
+	log := gophlog.New(gophlog.WithWriter(&buf))
 	client := NewClient(nil, Options{
 		Logger:              log,
-		MaskFieldStrategies: map[string]logging.MaskingStrategy{"token": logging.HideAll},
+		MaskFieldStrategies: map[string]gophlog.MaskingStrategy{"token": gophlog.HideAll},
 	})
 
 	resp, err := client.Get(srv.URL + "/x?token=supersecret&page=1")
@@ -224,7 +224,7 @@ func TestTransportMasksURLQuery(t *testing.T) {
 
 func TestTransportErrorPath(t *testing.T) {
 	var buf bytes.Buffer
-	log := logging.New(logging.WithWriter(&buf))
+	log := gophlog.New(gophlog.WithWriter(&buf))
 	// Point at a closed port so RoundTrip returns a transport error.
 	client := NewClient(nil, Options{Logger: log, LogRequestBody: true})
 
@@ -250,7 +250,7 @@ func TestTransportExcludeURLs(t *testing.T) {
 	defer srv.Close()
 
 	var buf bytes.Buffer
-	log := logging.New(logging.WithWriter(&buf))
+	log := gophlog.New(gophlog.WithWriter(&buf))
 	client := NewClient(nil, Options{Logger: log, ExcludeURLs: []string{srv.URL + "/health"}})
 
 	resp, err := client.Get(srv.URL + "/health")

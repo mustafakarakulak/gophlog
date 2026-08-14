@@ -1,5 +1,5 @@
 // Package httpclient provides an http.RoundTripper that automatically logs
-// outbound HTTP requests/responses using github.com/mustafakarakulak/go-logging.
+// outbound HTTP requests/responses using github.com/mustafakarakulak/gophlog.
 //
 // It captures request/response bodies, duration and status, applies field
 // masking, logs failures (including timeouts) and propagates the correlation ID
@@ -17,14 +17,14 @@ import (
 	"strings"
 	"time"
 
-	logging "github.com/mustafakarakulak/go-logging"
-	"github.com/mustafakarakulak/go-logging/internal/httplog"
+	"github.com/mustafakarakulak/gophlog"
+	"github.com/mustafakarakulak/gophlog/internal/httplog"
 )
 
 // Options configures the logging transport.
 type Options struct {
-	// Logger to use. Defaults to logging.Default().
-	Logger *logging.Logger
+	// Logger to use. Defaults to gophlog.Default().
+	Logger *gophlog.Logger
 
 	// LogRequestBody / LogResponseBody toggle body capture. Default: true.
 	LogRequestBody  bool
@@ -34,15 +34,15 @@ type Options struct {
 	MaxBodySize int
 
 	// MaskFieldStrategies masks named JSON fields in request/response bodies.
-	MaskFieldStrategies map[string]logging.MaskingStrategy
+	MaskFieldStrategies map[string]gophlog.MaskingStrategy
 
 	// LogExtraFields lifts named JSON fields into the searchable `extra` object.
 	LogExtraFields []string
 
 	// SuccessLogLevel is used for 2xx/3xx. Default: INFO.
-	SuccessLogLevel logging.Level
+	SuccessLogLevel gophlog.Level
 	// ErrorLogLevel is used for 4xx/5xx and transport errors. Default: ERROR.
-	ErrorLogLevel logging.Level
+	ErrorLogLevel gophlog.Level
 
 	// EventName overrides the event name. Default: "http_client_request".
 	EventName string
@@ -64,16 +64,16 @@ type Options struct {
 
 func (o *Options) applyDefaults() {
 	if o.Logger == nil {
-		o.Logger = logging.Default()
+		o.Logger = gophlog.Default()
 	}
 	if o.MaxBodySize == 0 {
 		o.MaxBodySize = 100 * 1024
 	}
 	if o.SuccessLogLevel == "" {
-		o.SuccessLogLevel = logging.INFO
+		o.SuccessLogLevel = gophlog.INFO
 	}
 	if o.ErrorLogLevel == "" {
-		o.ErrorLogLevel = logging.ERROR
+		o.ErrorLogLevel = gophlog.ERROR
 	}
 	if o.EventName == "" {
 		o.EventName = "http_client_request"
@@ -130,8 +130,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	outReq := req.Clone(ctx)
 
 	// Propagate the correlation ID downstream.
-	if cid := logging.CorrelationID(ctx); cid != "" && outReq.Header.Get(logging.CorrelationHeader) == "" {
-		outReq.Header.Set(logging.CorrelationHeader, cid)
+	if cid := gophlog.CorrelationID(ctx); cid != "" && outReq.Header.Get(gophlog.CorrelationHeader) == "" {
+		outReq.Header.Set(gophlog.CorrelationHeader, cid)
 	}
 
 	var requestBody string
@@ -225,7 +225,7 @@ const bodyTooLarge = "[body not logged: exceeds MaxBodySize]"
 
 // maskedURL returns u as a string with sensitive query parameters masked. The
 // original URL is never mutated.
-func maskedURL(u *url.URL, strategies map[string]logging.MaskingStrategy) string {
+func maskedURL(u *url.URL, strategies map[string]gophlog.MaskingStrategy) string {
 	if u == nil {
 		return ""
 	}
@@ -266,7 +266,7 @@ func processBody(body, contentType string, opts Options, isRequest bool, extra m
 		httplog.CollectExtra(decoded, opts.LogExtraFields, prefix, extra)
 	}
 	if len(opts.MaskFieldStrategies) > 0 {
-		decoded = logging.MaskJSON(decoded, opts.MaskFieldStrategies)
+		decoded = gophlog.MaskJSON(decoded, opts.MaskFieldStrategies)
 	}
 	out, err := json.Marshal(decoded)
 	if err != nil {
