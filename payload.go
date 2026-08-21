@@ -115,20 +115,20 @@ var (
 	textMarshalerTyp = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
 )
 
-// mapKeyString renders a map key the way encoding/json resolves it: string
-// kinds by value first (named string types included, even when they implement
-// TextMarshaler), then TextMarshaler, then integer kinds in decimal. Rendering
-// by Kind rather than by concrete type is what keeps a `type K string` key from
-// taking the json.Marshal fallback and ending up wrapped in literal quotes.
+// mapKeyString renders a map key the way encoding/json resolves it: TextMarshaler
+// or string kind first depending on the toolchain (see mapKeyPrefersText), then
+// integer kinds in decimal. Rendering by Kind rather than by concrete type is
+// what keeps a `type K string` key from taking the json.Marshal fallback and
+// ending up wrapped in literal quotes.
 func mapKeyString(k reflect.Value) string {
-	if k.Kind() == reflect.String {
-		return k.String()
-	}
-	if k.Type().Implements(textMarshalerTyp) {
+	if mapKeyPrefersText(k) {
 		if b, err := k.Interface().(encoding.TextMarshaler).MarshalText(); err == nil {
 			return string(b)
 		}
 		return ""
+	}
+	if k.Kind() == reflect.String {
+		return k.String()
 	}
 	switch k.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:

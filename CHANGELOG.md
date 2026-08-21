@@ -8,6 +8,15 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- Map keys that implement `encoding.TextMarshaler` on a string kind now follow
+  the toolchain: Go 1.27 resolves `MarshalText` before the string kind, earlier
+  versions resolve the string kind first. Rendering stays identical to
+  `encoding/json` on every supported Go version.
+- CI: golangci-lint v2.13.1, the first release that analyses Go 1.27 packages
+  without crashing.
+
 ## [1.0.0] - 2026-08-14
 
 First stable release. The behaviours below were corrected before tagging,
