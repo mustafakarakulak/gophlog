@@ -77,7 +77,7 @@ func main() {
 		WithPayload(map[string]any{"request_id": "req-123"}).Log()
 
 	fmt.Println("\n== 7. Context propagation ==")
-	ctx := gophlog.WithCorrelationID(context.Background(), "b7f5e0b3b78b4b0fb2df8e5a9c3e22e5")
+	ctx := gophlog.WithCorrelationID(context.Background(), "019baa68-80eb-7b0f-b2df-8e5a9c3e22e5")
 	log.Info("Handled with trace", "traced_event").Ctx(ctx).Log()
 
 	fmt.Println("\n== 8. HTTP server middleware ==")

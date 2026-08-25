@@ -8,6 +8,44 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-25
+
+### Changed
+
+- **`NewCorrelationID` now returns a UUIDv7** ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562.html)
+  §5.7) in canonical lowercase form — `019baa68-80eb-7b0f-b2df-8e5a9c3e22e5` —
+  instead of 32 dashless hex characters. The leading 48 bits are the generation
+  time in Unix milliseconds, so IDs sort lexicographically in creation order and
+  the timestamp can be recovered from the ID; the remaining 74 bits still come
+  from `crypto/rand`. The format matches PostgreSQL 18's built-in `uuidv7()`, so
+  correlation IDs and consumer-side database keys no longer diverge. IDs minted
+  within the same millisecond are unique but unordered relative to each other.
+
+  Still no external dependencies: the UUID is assembled from `crypto/rand` and
+  `time`.
+
+  **Migration.** No exported signature changed, so this is a minor release — but
+  the *generated value* changed shape, which affects anything downstream that
+  assumed the old one:
+
+  - Log queries, dashboard filters and alert rules matching `trace_id` against
+    `^[0-9a-f]{32}$` (or a bare 32-character length check) stop matching. The new
+    pattern is
+    `^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`.
+  - Columns sized for 32 characters need 36. A `uuid`-typed column now accepts
+    the value directly.
+  - IDs generated before upgrading keep the old form; expect both shapes in
+    retained log data.
+
+  Inbound IDs are unaffected: `IsValidCorrelationID` and `MaxCorrelationIDLen`
+  are unchanged, so the middleware still adopts any valid hex, UUID or W3C
+  trace-context value a caller sends, including the old 32-hex form.
+- When `crypto/rand` fails (still possible on Go 1.23; reads became infallible
+  in Go 1.24), `NewCorrelationID` returns a well-formed UUIDv7 with a real
+  timestamp and zeroed random bits rather than the previous run of 32 zeros. The
+  result passes format validation and is never the nil UUID, while the zeroed
+  entropy keeps the failure recognisable.
+
 ### Fixed
 
 - Map keys that implement `encoding.TextMarshaler` on a string kind now follow
@@ -308,7 +346,8 @@ First public release.
   dumps.
 - Kubernetes pod metadata support, either static or from the environment.
 
-[Unreleased]: https://github.com/mustafakarakulak/gophlog/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/mustafakarakulak/gophlog/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/mustafakarakulak/gophlog/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/mustafakarakulak/gophlog/compare/v0.0.3...v1.0.0
 [0.0.3]: https://github.com/mustafakarakulak/gophlog/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/mustafakarakulak/gophlog/compare/v0.0.1...v0.0.2

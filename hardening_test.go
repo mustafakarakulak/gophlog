@@ -306,8 +306,8 @@ func TestWithAutoTraceID(t *testing.T) {
 
 	m := parseLine(t, &buf)
 	id, _ := m["trace_id"].(string)
-	if len(id) != 32 {
-		t.Errorf("auto trace_id = %q; want 32 hex chars", id)
+	if !uuidv7Pattern.MatchString(id) {
+		t.Errorf("auto trace_id = %q; want canonical uuidv7", id)
 	}
 }
 

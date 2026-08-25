@@ -253,7 +253,8 @@ func TestMiddlewareRejectsUntrustedCorrelationID(t *testing.T) {
 		header string
 		want   string // "" means: expect a generated ID instead
 	}{
-		{"valid is adopted", "b7f5e0b3b78b4b0fb2df8e5a9c3e22e5", "b7f5e0b3b78b4b0fb2df8e5a9c3e22e5"},
+		{"valid hex is adopted", "b7f5e0b3b78b4b0fb2df8e5a9c3e22e5", "b7f5e0b3b78b4b0fb2df8e5a9c3e22e5"},
+		{"valid uuidv7 is adopted", "019baa68-80eb-7b0f-b2df-8e5a9c3e22e5", "019baa68-80eb-7b0f-b2df-8e5a9c3e22e5"},
 		{"oversized is replaced", strings.Repeat("a", 500), ""},
 		{"structured value is replaced", `{"injected":true}`, ""},
 		{"spaces are replaced", "not a valid id", ""},

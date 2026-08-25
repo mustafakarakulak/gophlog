@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"time"
 )
 
 // CorrelationHeader is the HTTP header used to propagate the correlation ID
@@ -60,15 +61,58 @@ func withField(ctx context.Context, set func(*ctxFields)) context.Context {
 	return context.WithValue(ctx, ctxKeyFields, &next)
 }
 
-// NewCorrelationID returns a new random 32-character hex correlation ID
-// (128 bits of entropy, rendered without dashes).
+// randRead is crypto/rand.Read, indirected so tests can exercise the
+// entropy-failure path in NewCorrelationID.
+var randRead = rand.Read
+
+// NewCorrelationID returns a new correlation ID as a UUIDv7 (RFC 9562 §5.7) in
+// canonical lowercase form, for example "019baa68-80eb-7b0f-b2df-8e5a9c3e22e5".
+//
+// The leading 48 bits hold the generation time as Unix milliseconds, so the
+// timestamp can be recovered from the ID and two IDs created in different
+// milliseconds compare lexicographically in the order they were created. The
+// remaining 74 bits come from crypto/rand. IDs created within the same
+// millisecond are unique but carry no order relative to each other.
 func NewCorrelationID() string {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand should not fail; fall back to a fixed-length zero ID.
-		return "00000000000000000000000000000000"
+
+	// unix_ts_ms: bits 0-47, big-endian milliseconds since the Unix epoch.
+	ms := uint64(time.Now().UnixMilli())
+	b[0] = byte(ms >> 40)
+	b[1] = byte(ms >> 32)
+	b[2] = byte(ms >> 24)
+	b[3] = byte(ms >> 16)
+	b[4] = byte(ms >> 8)
+	b[5] = byte(ms)
+
+	// rand_a and rand_b: the remaining bits, minus the version and variant
+	// fields overwritten below.
+	if _, err := randRead(b[6:]); err != nil {
+		// crypto/rand can still fail on Go 1.23 (it became infallible in Go
+		// 1.24). Keep the real timestamp and zero the random bits: the result
+		// is a well-formed, ordered UUIDv7 rather than a malformed value or the
+		// nil UUID, and the zeroed entropy stays recognisable.
+		clear(b[6:])
 	}
-	return hex.EncodeToString(b[:])
+	b[6] = b[6]&0x0f | 0x70 // ver: bits 48-51 = 0b0111
+	b[8] = b[8]&0x3f | 0x80 // var: bits 64-65 = 0b10
+
+	return formatUUID(&b)
+}
+
+// formatUUID renders 16 bytes in the canonical lowercase 8-4-4-4-12 form.
+func formatUUID(b *[16]byte) string {
+	var out [36]byte
+	hex.Encode(out[0:8], b[0:4])
+	out[8] = '-'
+	hex.Encode(out[9:13], b[4:6])
+	out[13] = '-'
+	hex.Encode(out[14:18], b[6:8])
+	out[18] = '-'
+	hex.Encode(out[19:23], b[8:10])
+	out[23] = '-'
+	hex.Encode(out[24:36], b[10:16])
+	return string(out[:])
 }
 
 // MaxCorrelationIDLen is the longest correlation ID accepted from an untrusted

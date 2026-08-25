@@ -226,8 +226,8 @@ func TestContextHelpersResolved(t *testing.T) {
 
 func TestNewCorrelationIDFormat(t *testing.T) {
 	id := NewCorrelationID()
-	if len(id) != 32 {
-		t.Errorf("len = %d; want 32", len(id))
+	if !uuidv7Pattern.MatchString(id) {
+		t.Errorf("id = %q; want canonical uuidv7", id)
 	}
 	if id == NewCorrelationID() {
 		t.Error("two ids should differ")
