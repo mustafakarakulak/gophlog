@@ -45,6 +45,25 @@ and this project adheres to
   timestamp and zeroed random bits rather than the previous run of 32 zeros. The
   result passes format validation and is never the nil UUID, while the zeroed
   entropy keeps the failure recognisable.
+- The HTTP middleware now excludes `/scalar` from logging by default, alongside
+  the `/swagger` entry that was already there. Scalar is a common OpenAPI
+  documentation UI, and its asset requests are high-volume with no audit value.
+  Services that were logging those requests will stop seeing them; add an
+  explicit `IncludePaths` or override `ExcludePaths` if you want them back.
+
+### Added
+
+- `middleware.DefaultExcludePaths` exposes the path list `Options.ExcludePaths`
+  falls back to, so custom patterns can be appended instead of silently
+  replacing the defaults:
+
+  ```go
+  ExcludePaths: append(middleware.DefaultExcludePaths, "/internal/*"),
+  ```
+
+  Assigning `ExcludePaths` has always replaced the default list rather than
+  extending it; that behaviour is unchanged, but it is now documented and there
+  is a supported way to keep the defaults.
 
 ### Fixed
 

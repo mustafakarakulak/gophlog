@@ -169,6 +169,82 @@ func TestMiddlewareExcludePaths(t *testing.T) {
 	}
 }
 
+// TestMiddlewareDefaultExcludePaths pins the paths that are skipped when
+// Options.ExcludePaths is left unset, and the prefix matching that makes a bare
+// pattern cover its suffixed variants.
+func TestMiddlewareDefaultExcludePaths(t *testing.T) {
+	excluded := []string{
+		"/swagger", "/swagger/index.html",
+		"/scalar", "/scalar/", "/Scalar/openapi.json",
+		"/health", "/healthz", "/healthcheck", "/health/ready",
+		"/metrics",
+	}
+	logged := []string{"/api/users", "/", "/api/scalar"}
+
+	for _, path := range append(append([]string{}, excluded...), logged...) {
+		t.Run(path, func(t *testing.T) {
+			var buf bytes.Buffer
+			log := gophlog.New(gophlog.WithWriter(&buf))
+			mw := New(Options{Logger: log}) // ExcludePaths unset: defaults apply
+			handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+
+			wantLogged := true
+			for _, e := range excluded {
+				if e == path {
+					wantLogged = false
+					break
+				}
+			}
+			if wantLogged && buf.Len() == 0 {
+				t.Errorf("%s should be logged by default", path)
+			}
+			if !wantLogged && buf.Len() != 0 {
+				t.Errorf("%s should be excluded by default, got %q", path, buf.String())
+			}
+		})
+	}
+}
+
+// TestMiddlewareExcludePathsReplacesDefaults documents the sharp edge: assigning
+// ExcludePaths drops the defaults, and appending to DefaultExcludePaths keeps
+// them. The append must not mutate the shared default either.
+func TestMiddlewareExcludePathsReplacesDefaults(t *testing.T) {
+	serve := func(opts Options, path string) string {
+		var buf bytes.Buffer
+		opts.Logger = gophlog.New(gophlog.WithWriter(&buf))
+		handler := New(opts)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+		return buf.String()
+	}
+
+	// A bare assignment replaces the defaults, so /health is logged again.
+	if got := serve(Options{ExcludePaths: []string{"/internal"}}, "/health"); got == "" {
+		t.Error("assigning ExcludePaths should drop the defaults, but /health was still excluded")
+	}
+
+	// Appending keeps them.
+	custom := append(DefaultExcludePaths, "/internal") //nolint:gocritic // appending to the default is the documented pattern
+	if got := serve(Options{ExcludePaths: custom}, "/health"); got != "" {
+		t.Errorf("/health should stay excluded when appending to the defaults, got %q", got)
+	}
+	if got := serve(Options{ExcludePaths: custom}, "/internal/debug"); got != "" {
+		t.Errorf("/internal/debug should be excluded, got %q", got)
+	}
+
+	// The append above must not have grown the shared default in place.
+	for _, p := range DefaultExcludePaths {
+		if p == "/internal" {
+			t.Fatal("append leaked into DefaultExcludePaths")
+		}
+	}
+}
+
 func TestClientIPVariants(t *testing.T) {
 	mk := func(setup func(*http.Request)) string {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)

@@ -50,8 +50,11 @@ type Options struct {
 	// EventName overrides the event name. Default: "http_request".
 	EventName string
 
-	// ExcludePaths skips logging for matching paths (wildcards via trailing /*).
-	// Defaults to common swagger/health paths.
+	// ExcludePaths skips logging for matching paths (wildcards via trailing /*);
+	// a pattern without a wildcard matches by prefix, case-insensitively.
+	// Defaults to DefaultExcludePaths — common API-docs and probe endpoints.
+	// Setting this field replaces that list rather than adding to it, so append
+	// to DefaultExcludePaths to keep the defaults.
 	ExcludePaths []string
 	// IncludePaths, when set, limits logging to matching paths.
 	IncludePaths []string
@@ -64,6 +67,27 @@ type Options struct {
 	// when the service is NOT behind a trusted proxy: those headers are
 	// client-controlled and can otherwise be spoofed in audit logs.
 	DisableForwardedHeaders bool
+}
+
+// DefaultExcludePaths is the path list Options.ExcludePaths falls back to: API
+// documentation UIs and health/metrics probes, which are high-volume and carry
+// no audit value. Patterns match by prefix, so "/health" also covers
+// "/healthz" and "/health/ready".
+//
+// Assigning Options.ExcludePaths replaces this list; append to it to keep the
+// defaults alongside your own patterns:
+//
+//	ExcludePaths: append(middleware.DefaultExcludePaths, "/internal/*")
+//
+// Treat it as read-only: it is shared by every Options that relies on the
+// default.
+var DefaultExcludePaths = []string{
+	"/swagger",
+	"/scalar",
+	"/health",
+	"/healthz",
+	"/healthcheck",
+	"/metrics",
 }
 
 func (o *Options) applyDefaults() {
@@ -83,7 +107,7 @@ func (o *Options) applyDefaults() {
 		o.EventName = "http_request"
 	}
 	if o.ExcludePaths == nil {
-		o.ExcludePaths = []string{"/swagger", "/health", "/healthz", "/healthcheck", "/metrics"}
+		o.ExcludePaths = DefaultExcludePaths
 	}
 }
 

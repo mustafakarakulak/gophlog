@@ -268,7 +268,7 @@ mw := middleware.New(middleware.Options{
     ErrorLogLevel:   gophlog.ERROR,       // 4xx, 5xx
     EventName:       "http_request",
     IncludePaths:    []string{"/api/*"},
-    ExcludePaths:    []string{"/health", "/metrics", "/swagger/*"},
+    ExcludePaths:    append(middleware.DefaultExcludePaths, "/internal/*"),
     MaskFieldStrategies: map[string]gophlog.MaskingStrategy{
         "cardNumber": gophlog.CreditCard,
         "nationalId": gophlog.ShowFirst2AndLast2,
@@ -288,6 +288,36 @@ request and response bodies, query parameters, client IP (`X-Forwarded-For` /
 **Body capture is on by default**; turn it off with `DisableRequestBody` /
 `DisableResponseBody`. `middleware.NewDefault()`
 (= `middleware.New(middleware.Options{})`) gets you going with the defaults.
+
+### Skipping endpoints
+
+Paths matching `ExcludePaths` are skipped entirely — no log line, and no body
+capture or masking work either. Correlation IDs are still put into the request
+context, so outbound calls from an excluded handler keep their `trace_id`.
+
+Left unset, `ExcludePaths` falls back to `middleware.DefaultExcludePaths`:
+
+```go
+[]string{"/swagger", "/scalar", "/health", "/healthz", "/healthcheck", "/metrics"}
+```
+
+Patterns are matched case-insensitively, and a pattern **without** a wildcard
+matches by prefix — so `/scalar` also covers `/scalar/openapi.json`, and
+`/health` covers `/healthz` and `/health/ready`. Add a trailing `/*` to state
+the prefix explicitly. Note the flip side of prefix matching: `/health` would
+also silence a real `/healthy-users` endpoint; use `/health/*` plus `/healthz`
+if that collides with your routes.
+
+**Assigning `ExcludePaths` replaces the defaults rather than adding to them.**
+Append to keep them:
+
+```go
+ExcludePaths: append(middleware.DefaultExcludePaths, "/internal/*"),
+```
+
+`IncludePaths` is the allowlist counterpart: when non-empty, only matching paths
+are logged (an empty list includes everything). The same filtering exists for
+outbound calls as `ExcludeURLs` / `IncludeURLs` in the `httpclient` package.
 
 The incoming `X-Correlation-ID` header is client-controlled, so it is validated
 (at most 128 characters, `[A-Za-z0-9._:-]`); an invalid value is discarded and a
