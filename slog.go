@@ -23,8 +23,9 @@ type SlogOptions struct {
 	DisableEventKey bool
 
 	// AddSource includes the caller's file/line/function (taken from the slog
-	// record) in the extra object under "source". The slog.Logger must be created
-	// with AddSource enabled for the record to carry a program counter.
+	// record) in the extra object under "source". The location comes from the
+	// record's program counter, which slog.Logger always sets; a Record built
+	// by hand with a zero PC carries none.
 	AddSource bool
 }
 
@@ -51,7 +52,8 @@ func (o *SlogOptions) eventKey() string {
 //
 // Attributes land in the searchable extra object, with WithGroup nesting them in
 // sub-objects; an attribute whose value is an error is rendered via Error()
-// rather than serialized to an empty object. The handler passes the standard
+// rather than serialized to an empty object, and struct values honour their
+// `mask` tags, as in a payload. The handler passes the standard
 // testing/slogtest suite except for the zero-Record.Time rule: this format
 // always emits a timestamp, falling back to the logger clock when the record
 // carries no time.
@@ -73,6 +75,9 @@ func NewSlogLogger(l *Logger, opts *SlogOptions) *slog.Logger {
 type attrFrame struct {
 	groups []string
 	attrs  []slog.Attr
+	// plain reports that every attribute in the frame is plain (see
+	// plainAttr), so the frame alone never makes build check the extras.
+	plain bool
 }
 
 type slogHandler struct {
@@ -94,15 +99,21 @@ func (h *slogHandler) Handle(ctx context.Context, r slog.Record) error {
 	}
 
 	root := make(map[string]any)
+	callerMaps, maskTags := false, false
 	for _, f := range h.frames {
+		maskTags = maskTags || !f.plain
 		for _, a := range f.attrs {
-			addAttr(root, f.groups, a)
+			callerMaps = addAttr(root, f.groups, a) || callerMaps
 		}
 	}
 	r.Attrs(func(a slog.Attr) bool {
-		addAttr(root, h.groups, a)
+		callerMaps = addAttr(root, h.groups, a) || callerMaps
+		maskTags = maskTags || !plainAttr(a, len(h.groups))
 		return true
 	})
+	if callerMaps {
+		plainAttrMaps(root)
+	}
 
 	e := newEntry(h.logger, level, r.Message, "")
 	e.ctx = ctx
@@ -125,6 +136,7 @@ func (h *slogHandler) Handle(ctx context.Context, r slog.Record) error {
 
 	if len(root) > 0 {
 		e.extra = root
+		e.extraTags = maskTags
 	}
 
 	e.Log()
@@ -136,13 +148,15 @@ func (h *slogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		return h
 	}
 	resolved := make([]slog.Attr, len(attrs))
+	plain := true
 	for i, a := range attrs {
 		a.Value = a.Value.Resolve()
 		resolved[i] = a
+		plain = plain && plainAttr(a, len(h.groups))
 	}
 	frames := make([]attrFrame, len(h.frames)+1)
 	copy(frames, h.frames)
-	frames[len(h.frames)] = attrFrame{groups: h.groups, attrs: resolved}
+	frames[len(h.frames)] = attrFrame{groups: h.groups, attrs: resolved, plain: plain}
 
 	clone := *h
 	clone.frames = frames
@@ -163,46 +177,121 @@ func (h *slogHandler) WithGroup(name string) slog.Handler {
 }
 
 // addAttr inserts a (resolved) slog attribute into root at the given group path,
-// recursing into groups and inlining group attributes with an empty key.
-func addAttr(root map[string]any, groups []string, a slog.Attr) {
+// recursing into groups and inlining group attributes with an empty key. It
+// reports whether it stored a caller's map (see attrMap), in which case the
+// assembled tree must go through plainAttrMaps before it leaves Handle.
+func addAttr(root map[string]any, groups []string, a slog.Attr) (callerMap bool) {
 	a.Value = a.Value.Resolve()
 	if a.Equal(slog.Attr{}) {
-		return // zero attribute
+		return false // zero attribute
 	}
 	if a.Value.Kind() == slog.KindGroup {
 		members := a.Value.Group()
 		if len(members) == 0 {
-			return // empty group is omitted
+			return false // empty group is omitted
 		}
 		next := groups
 		if a.Key != "" {
 			next = appendGroup(groups, a.Key)
 		}
 		for _, m := range members {
-			addAttr(root, next, m)
+			callerMap = addAttr(root, next, m) || callerMap
 		}
-		return
+		return callerMap
 	}
 	if a.Key == "" {
-		return
+		return false
 	}
 	target := navigate(root, groups)
-	target[a.Key] = slogValue(a.Value)
+	v := slogValue(a.Value)
+	if m, ok := v.(map[string]any); ok {
+		target[a.Key] = attrMap(m)
+		return true
+	}
+	target[a.Key] = v
+	return false
 }
+
+// plainAttr reports whether attribute a, placed depth groups deep, adds only
+// plain values (see plainExtraValue) to the extras, so it cannot make them
+// hold a mask tag. The value is inspected as given: a LogValuer is not
+// resolved a second time just for this and counts as not plain, as does
+// anything nested deeper than the mask-tag walk goes.
+func plainAttr(a slog.Attr, depth int) bool {
+	if depth > maxPayloadDepth {
+		return false
+	}
+	switch v := a.Value; v.Kind() {
+	case slog.KindAny:
+		x := v.Any()
+		if _, isErr := x.(error); isErr {
+			return true // written as its Error() string
+		}
+		return plainExtraValue(x)
+	case slog.KindGroup:
+		if a.Key != "" {
+			depth++
+		}
+		for _, m := range v.Group() {
+			if !plainAttr(m, depth) {
+				return false
+			}
+		}
+		return true
+	case slog.KindLogValuer:
+		return false
+	}
+	return true
+}
+
+// attrMap tags a map[string]any attribute value while a record is assembled.
+// The map belongs to the caller — and, bound through WithAttrs, is shared by
+// every concurrent Handle call — so it must never be written into; the
+// distinct type is what tells navigate it is not one of its own groups. The
+// conversion is free, so a record without map-valued attributes pays nothing.
+type attrMap map[string]any
 
 // navigate descends into root following the group path, creating nested maps as
 // needed, and returns the leaf map where a value should be placed.
+//
+// A group whose key already holds a caller's map takes the key over with a
+// copy of that map's fields, so the group's attributes land beside them while
+// the caller's map stays untouched. Nested maps in the copy stay tagged, so a
+// deeper group copies them in turn. Any other value is replaced, as a later
+// attribute with the same key would replace it.
 func navigate(root map[string]any, groups []string) map[string]any {
 	m := root
 	for _, g := range groups {
 		child, ok := m[g].(map[string]any)
 		if !ok {
-			child = make(map[string]any)
+			prev, _ := m[g].(attrMap)
+			child = make(map[string]any, len(prev))
+			for k, v := range prev {
+				if nested, isMap := v.(map[string]any); isMap {
+					v = attrMap(nested)
+				}
+				child[k] = v
+			}
 			m[g] = child
 		}
 		m = child
 	}
 	return m
+}
+
+// plainAttrMaps turns the attrMap tags under m back into plain map[string]any
+// values, so the rest of the logger sees ordinary maps. It descends only into
+// the groups navigate built — every caller's map is still tagged at this
+// point — so it never writes into a caller's map.
+func plainAttrMaps(m map[string]any) {
+	for k, v := range m {
+		switch x := v.(type) {
+		case attrMap:
+			m[k] = map[string]any(x)
+		case map[string]any:
+			plainAttrMaps(x)
+		}
+	}
 }
 
 func appendGroup(groups []string, name string) []string {
@@ -217,7 +306,7 @@ func appendGroup(groups []string, name string) []string {
 func slogValue(v slog.Value) any {
 	if v.Kind() == slog.KindAny {
 		if err, ok := v.Any().(error); ok {
-			return err.Error()
+			return errorString(err)
 		}
 	}
 	return v.Any()

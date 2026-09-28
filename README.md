@@ -2,7 +2,6 @@
 
 [![CI](https://github.com/mustafakarakulak/gophlog/actions/workflows/ci.yml/badge.svg)](https://github.com/mustafakarakulak/gophlog/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/mustafakarakulak/gophlog.svg)](https://pkg.go.dev/github.com/mustafakarakulak/gophlog)
-[![Go Report Card](https://goreportcard.com/badge/github.com/mustafakarakulak/gophlog)](https://goreportcard.com/report/github.com/mustafakarakulak/gophlog)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/go-1.23%2B-00ADD8.svg)](go.mod)
 
@@ -20,7 +19,7 @@ FluentBit and OpenSearch.
 - ✅ **ISO-8601 timestamps** — UTC, millisecond precision
 - ✅ **Null-safe** — empty fields are dropped automatically
 - ✅ **Field masking** — eight **fail-closed** strategies plus the `mask` / `logextra` struct tags
-- ✅ **`encoding/json`-compatible payloads** — `omitempty`, embedded structs and `json:"-"` behave identically
+- ✅ **`encoding/json`-compatible payloads** — `omitempty`, embedded structs and `json:"-"` behave identically (keys are written in sorted order)
 - ✅ **HTTP middleware** — request/response logging for `net/http`
 - ✅ **HTTP client transport** — an `http.RoundTripper` for outbound calls
 - ✅ **log/slog adapter** — a `slog.Handler` bridge for the standard `log/slog` API
@@ -83,6 +82,9 @@ log.Fatal("Critical failure", "fatal_event").WithError(err).Log()
 ```
 
 Records below the threshold set with `gophlog.WithMinLevel(...)` are not written.
+Level names match case-insensitively: `gophlog.Level("error")` filters as
+`ERROR` and is written as `ERROR`. Any other value is written unchanged and
+filtered as `INFO`.
 
 > ⚠️ **`Fatal` does not terminate the process.** Unlike the standard library's
 > `log.Fatal`, it only writes a record at `FATAL` level; exiting is the caller's
@@ -96,7 +98,10 @@ Records below the threshold set with `gophlog.WithMinLevel(...)` are not written
 ### Catching logging failures
 
 When the writer returns an error, or a payload cannot be serialized, the failure
-is not swallowed — `WithOnError` receives it:
+is not swallowed — `WithOnError` receives it. It also hears about values the
+logger had to repair (a cycle cut with a marker or an unknown `mask` tag in a
+payload or extra, a NaN or ±Inf). A cycle in an `IntegrationInfo` body is only
+cut with the marker, not reported:
 
 ```go
 log := gophlog.New(gophlog.WithOnError(func(err error) {
@@ -109,6 +114,17 @@ log := gophlog.New(gophlog.WithOnError(func(err error) {
 An unserializable payload also stays visible in the log line itself: the
 `payload` field carries `[unserializable: ...]`, and `error_type` becomes
 `LogSerializationError` unless the caller attached an error of their own.
+
+A NaN or ±Inf in `extra` or a `slog` attribute is written as the string `"NaN"`,
+`"+Inf"` or `"-Inf"`, and a non-finite `duration_ms` or
+`integration.external_duration_ms` is omitted; the rest of the line is kept.
+Any other value in `extra` that cannot be serialized (a channel, for example)
+reduces the line to a minimal record — `timestamp`, `level`, `trace_id`,
+`event` and `message` — with `error_type` set to `LogSerializationError`.
+In `extra` and in `IntegrationInfo` bodies, a cycle is cut with the marker only
+when it runs through `map[string]any` / `[]any` values or structs with `mask`
+tags; a cycle through struct types without `mask` tags still fails to
+serialize (the minimal record, or `[unserializable: ...]` in a body).
 
 ## Fluent API (Entry) methods
 
@@ -221,13 +237,30 @@ log.Info("Request processed", "request_processed").
     Log()
 ```
 
-- `mask:"..."` → the field value is masked in place.
+- `mask:"..."` → the field value is masked in place. On a type that renders
+  itself (`MarshalJSON` / `MarshalText`) the rendered text is masked. A value
+  that names no strategy — a typo such as `mask:"hide"`, or `mask:""` — hides
+  the field entirely and, in a payload or extra, is reported to `WithOnError`
+  (in an `IntegrationInfo` body it is only hidden).
 - `logextra:"true"` → the field is **removed** from the payload and moved into
-  the `extra` object under its JSON name.
+  the `extra` object under its JSON name. Outside a payload (an extra value, a
+  `slog` attribute) the field stays where it is.
 
-Payload rendering matches `encoding/json` exactly: `json:"-"` is skipped,
-`omitempty` drops empty fields, untagged embedded struct fields are promoted to
-the parent object, and a `nil` embedded pointer produces no field at all.
+Apart from those two tags, payload rendering follows the `encoding/json` rules:
+`json:"-"` is skipped, `omitempty` drops empty fields, the `string` option
+quotes scalars, `MarshalJSON` / `MarshalText` methods (pointer receivers
+included) are called where `encoding/json` would call them, untagged embedded
+struct fields are promoted to the parent object under the same name-conflict
+rules, and a `nil` embedded pointer produces no field at all. The differences:
+
+- Object keys are written sorted, the way `encoding/json` orders map keys, so
+  struct fields do not keep their declaration order: a struct that declares
+  `zeta` before `alpha` renders as `{"alpha":"a","zeta":"z"}`.
+- `<`, `>` and `&` are written as-is; `json.Marshal` escapes them.
+- A value that contains itself is cut with `"[cycle: max depth exceeded]"`
+  where it first repeats, and reported to `WithOnError`; `json.Marshal` fails
+  instead. Nesting deeper than 64 levels is cut with `"[max depth exceeded]"`.
+- The `omitzero` option is not supported: such a field is always rendered.
 
 ### 3. Masking strategies
 
@@ -240,7 +273,11 @@ the parent object, and a `nil` embedded pointer produces no field at all.
 | Last 2 | `gophlog.ShowLast2` | `*********32` |
 | First 1 + last 1 | `gophlog.ShowFirst1AndLast1` | `1********2` |
 | First 2 + last 2 | `gophlog.ShowFirst2AndLast2` | `12*******32` |
-| Credit card | `gophlog.CreditCard` | `5101 52 **** ** 4582` |
+| Credit card | `gophlog.CreditCard` | `********` (fewer than 12 digits, see below) |
+
+`CreditCard` keeps the first six digits (the BIN) and the last four of a card
+number, strips spaces, dashes and underscores, and regroups the result:
+`5101521234564582` and `5101 5212 3456 4582` both become `5101 52 **** ** 4582`.
 
 `gophlog.MaskAll` is a deprecated older name carrying the same value as
 `HideAll`; use `HideAll` in new code.
@@ -251,7 +288,52 @@ the parent object, and a `nil` embedded pointer produces no field at all.
 > hides values shorter than 12 digits entirely, since those cannot be real cards.
 
 > With the hide-everything strategy (`hideall`) the masked run is capped at eight
-> asterisks, so the output does not reveal the length of the secret.
+> asterisks, so the output does not reveal the length of a longer secret; a
+> value of up to eight characters gets one asterisk per character.
+
+### 4. What is masked and what is not
+
+Masking works on field names, not on content — a card number inside a
+free-text string is not detected — and it covers specific parts of a record:
+
+- **`mask` struct tags** apply wherever a struct value is rendered, also inside
+  maps and slices: the payload, values passed to `WithExtra` / `WithExtraField`
+  (on an entry or a child logger), `log/slog` attributes, and the
+  `RequestBody` / `ResponseBody` of an `IntegrationInfo`.
+- **Name-based strategies** — `Mask`, `MaskMany`, `WithPayloadMasked`, a child
+  logger's bound `Mask` / `MaskMany`, and the `MaskFieldStrategies` option of
+  the HTTP middleware and client — apply to the payload (including the fields
+  that `logextra` lifts out of it) and to HTTP bodies and query parameters.
+  They do not reach `WithExtra` values, `slog` attributes or the
+  `integration` / `queue` / `job` objects; use `mask` tags for those.
+- **Names match exactly, ignoring case, at any depth.** A strategy for
+  `access_token` covers `ACCESS_TOKEN` and `Access_Token`, but not
+  `accessToken` or `access-token` — list every spelling your data uses.
+- **Never masked:** `message`, `error_message` and `stack_trace`. Keep secrets
+  out of log messages and error strings.
+- **HTTP bodies** are masked when they are JSON or
+  `application/x-www-form-urlencoded`. Any other body that does not parse as
+  JSON — NDJSON, XML, plain text or malformed JSON — is logged as-is (up to
+  `MaxBodySize`); turn capture off with `DisableRequestBody` /
+  `DisableResponseBody` for endpoints that carry secrets in such bodies.
+- **Some HTTP bodies are never logged.** The middleware and the client log a
+  fixed marker in their place; the body itself still reaches the handler or
+  the caller untouched:
+  - `[body not logged: exceeds MaxBodySize]` — larger than `MaxBodySize`.
+  - `[body not logged: non-identity Content-Encoding]` — a `Content-Encoding`
+    other than `identity` (`gzip`, `br`, …), whether or not masking is
+    configured.
+  - `[body not logged: streaming]` — Server-Sent Events (`text/event-stream`),
+    gRPC (`application/grpc*`), Connect streaming (`application/connect+*`),
+    any media type with `stream=watch`, and `101 Switching Protocols`
+    responses, whether or not masking is configured. Reading them up front
+    would block until the stream ends.
+  - `[body not logged: cannot be masked]` — only when `MaskFieldStrategies` is
+    set: a form body that does not parse (`x=%zz`, `;` separators), or one
+    that parses both as a form with a masked field and as JSON.
+- HTTP headers are not part of the log line. The client's `LogCurl` dump,
+  which does include them, redacts the credential headers (see
+  [Outbound HTTP calls](#outbound-http-calls-http-client)).
 
 ## HTTP server middleware
 
@@ -285,6 +367,10 @@ Captured automatically: HTTP method/path/status, duration in milliseconds,
 request and response bodies, query parameters, client IP (`X-Forwarded-For` /
 `X-Real-IP`), bytes in/out, the correlation ID and the workflow headers.
 
+A handler that panics is logged as a `500` with `panic: …` in `error_message`;
+the panic then continues with the same value, so `net/http` or an outer
+recovery middleware handles it as before.
+
 **Body capture is on by default**; turn it off with `DisableRequestBody` /
 `DisableResponseBody`. `middleware.NewDefault()`
 (= `middleware.New(middleware.Options{})`) gets you going with the defaults.
@@ -292,8 +378,9 @@ request and response bodies, query parameters, client IP (`X-Forwarded-For` /
 ### Skipping endpoints
 
 Paths matching `ExcludePaths` are skipped entirely — no log line, and no body
-capture or masking work either. Correlation IDs are still put into the request
-context, so outbound calls from an excluded handler keep their `trace_id`.
+capture or masking work either. The correlation ID, workflow IDs and client IP
+still go into the request context, so records and outbound calls from an
+excluded handler keep their `trace_id`.
 
 Left unset, `ExcludePaths` falls back to `middleware.DefaultExcludePaths`:
 
@@ -322,6 +409,11 @@ outbound calls as `ExcludeURLs` / `IncludeURLs` in the `httpclient` package.
 The incoming `X-Correlation-ID` header is client-controlled, so it is validated
 (at most 128 characters, `[A-Za-z0-9._:-]`); an invalid value is discarded and a
 fresh ID is generated. A client cannot steer the `trace_id` in your audit logs.
+The workflow headers (`X-Child-Workflow-Id`, `X-Run-Id`,
+`X-Parent-Workflow-Id`) keep an open character set, since workflow IDs may
+contain `/`, `@` or spaces, but a value longer than 1000 bytes, not valid UTF-8,
+or containing control characters, U+2028 / U+2029 or bidi embedding, override
+or isolate characters is dropped.
 If you are not behind a trusted proxy, set `DisableForwardedHeaders: true` —
 otherwise `X-Forwarded-For` / `X-Real-IP` can be spoofed.
 
@@ -360,11 +452,21 @@ resp, err := client.Do(req)
 - Wrap an existing `*http.Client` with `httpclient.NewClient(existing, opts)`.
 - Body capture is on by default; turn it off with `DisableRequestBody` /
   `DisableResponseBody`.
-- In the `LogCurl` output, credential-bearing headers (`Authorization`,
-  `Cookie`, `X-Api-Key`, …) are replaced with `[REDACTED]` and the body is
-  written masked. The command is therefore not runnable as-is — that is a
-  deliberate trade. Any other header named in `MaskFieldStrategies` is masked
-  with the corresponding strategy.
+- Requests filtered out by `ExcludeURLs` / `IncludeURLs` are not logged, but
+  still carry `X-Correlation-ID`.
+- URL userinfo is redacted in full in `http_path`, the message and the curl
+  dump (`https://user:pass@host` → `https://xxxxx:xxxxx@host`,
+  `https://<token>@host` → `https://xxxxx@host`), and the URL fragment is
+  dropped.
+- In the `LogCurl` output, credential-bearing headers are replaced with
+  `[REDACTED]` and the body is written masked. The command is therefore not
+  runnable as-is — that is a deliberate trade. The redacted headers are
+  `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`,
+  `Api-Key`, `Apikey`, `X-Auth-Token`, `X-Access-Token`, `X-Session-Token`,
+  `Private-Token`, `X-Goog-Api-Key`, `X-Amz-Security-Token`,
+  `Ocp-Apim-Subscription-Key`, `X-Csrf-Token` and `X-Xsrf-Token`. Any other
+  header named in `MaskFieldStrategies` is masked with the corresponding
+  strategy.
 
 ## Distributed Tracing
 
@@ -392,6 +494,39 @@ log := gophlog.New(gophlog.WithTraceExtractor(func(ctx context.Context) (traceID
     return "", ""
 }))
 ```
+
+The extractor runs only when the entry and the context leave `trace_id` or
+`span_id` unresolved, and it fills only what is missing. Where no correlation
+ID is in context — background jobs, queue consumers — it supplies both.
+
+> ⚠️ **Behind the HTTP middleware, `trace_id` is not the OpenTelemetry trace
+> ID.** The middleware puts a correlation ID into every request context (the
+> validated `X-Correlation-ID` header, or a fresh UUIDv7), and a context
+> correlation ID ranks above the extractor. Records logged inside a request
+> therefore carry the correlation ID as `trace_id` but the OpenTelemetry
+> `span_id`, a pair that does not match up in a tracing backend.
+
+To make the two agree, hand the OpenTelemetry trace ID to the middleware as the
+correlation ID: set the header in a handler that runs after the OpenTelemetry
+handler (so the span exists) and before this middleware. A 32-character hex
+trace ID passes `IsValidCorrelationID`, so the middleware adopts it:
+
+```go
+func otelCorrelation(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if sc := trace.SpanContextFromContext(r.Context()); sc.HasTraceID() {
+            r = r.Clone(r.Context()) // handlers must not modify the original request
+            r.Header.Set(gophlog.CorrelationHeader, sc.TraceID().String())
+        }
+        next.ServeHTTP(w, r)
+    })
+}
+
+handler := otelhttp.NewHandler(otelCorrelation(mw(mux)), "server")
+```
+
+This replaces any `X-Correlation-ID` the caller sent, and the `httpclient`
+transport then forwards the trace ID as `X-Correlation-ID` on outbound calls.
 
 Context helpers: `WithCorrelationID`, `WithSpanID`, `WithRequestID`,
 `WithTenantID`, `WithUserID`, `WithClientIP`, `WithSessionID`, `WithWorkflow`.
@@ -447,14 +582,15 @@ Behaviour:
 - **Attributes:** written into the searchable `extra` object;
   `WithGroup`/`slog.Group` is preserved as a nested object.
 - **Errors:** attributes holding an `error` value are written as their
-  `.Error()` string rather than as `{}`.
-- **`event` mapping:** `EventKey` (default `"event"`) lifts one attribute into
-  the `event` field; `SlogOptions{DisableEventKey: true}` turns that off. An
-  empty `EventKey` falls back to the default, so `SlogOptions{AddSource: true}`
-  does not disable the mapping by accident.
+  `.Error()` string rather than as `{}` (a typed-nil error as `<nil>`).
+- **`event` mapping:** `EventKey` (default `"event"`) lifts one top-level
+  string attribute into the `event` field; `SlogOptions{DisableEventKey: true}`
+  turns that off. An empty `EventKey` falls back to the default, so
+  `SlogOptions{AddSource: true}` does not disable the mapping by accident. A
+  record without that attribute has no `event` field at all.
 - **Source location:** `SlogOptions{AddSource: true}` adds the caller's
-  `function`/`file`/`line` under `extra.source` (the slog logger itself must
-  have been created with `AddSource`).
+  `function`/`file`/`line` under `extra.source`, taken from the record's program
+  counter (a record built by hand with a zero PC gets none).
 
 The adapter passes the official `testing/slogtest` suite, except that this
 format always emits a `timestamp` field (the zero-`Record.Time` rule).
@@ -500,7 +636,7 @@ When a correlation ID is resolved from context, the line also carries
 | Field | Type | Description |
 |-------|------|-------------|
 | `timestamp` | string (ISO-8601) | UTC timestamp |
-| `level` | string | TRACE/DEBUG/INFO/WARN/ERROR/FATAL |
+| `level` | string | TRACE/DEBUG/INFO/WARN/ERROR/FATAL (any other `Level` value is written as given) |
 | `log_type` | string? | app / audit / security |
 | `category` | string? | Log category |
 | `trace_id` | string? | Distributed tracing ID, a UUIDv7 when generated by this library (omitted when unresolved) |
@@ -510,10 +646,10 @@ When a correlation ID is resolved from context, the line also carries
 | `http_method`, `http_path` | string? | HTTP method / path |
 | `query_params` | object? | Query parameters |
 | `http_status` | number? | HTTP status code |
-| `duration_ms` | number? | Duration in milliseconds |
+| `duration_ms` | number? | Duration in milliseconds (omitted when NaN or ±Inf) |
 | `bytes_in`, `bytes_out` | number? | Byte counts |
 | `request_body`, `response_body` | string? | Request/response body |
-| `event` | string | Event name |
+| `event` | string? | Event name (omitted when empty, e.g. a `slog` record without an `event` attribute) |
 | `message` | string | Log message |
 | `payload` | string? | Stringified JSON payload |
 | `error_type`, `error_message`, `stack_trace` | string? | Error details (stack capped at 3000 chars + truncation marker) |
@@ -569,7 +705,8 @@ guarantee.
 ## Security
 
 Masking is fail-closed by design, and credential-bearing HTTP headers are
-redacted in the curl dump. If you find a leak or a bypassed mask, please do not
+redacted in the curl dump; [what is masked and what is not](#4-what-is-masked-and-what-is-not)
+lists the limits. If you find a leak or a bypassed mask, please do not
 open a public issue — see [SECURITY.md](SECURITY.md) for the reporting flow and
 what is in scope.
 

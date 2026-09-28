@@ -135,19 +135,16 @@ func TestMaskQueryValues(t *testing.T) {
 }
 
 func TestMaskFormBody(t *testing.T) {
-	masked, ok := MaskFormBody("user=alice&password=hunter2", map[string]gophlog.MaskingStrategy{"password": gophlog.HideAll})
-	if !ok {
-		t.Fatal("valid form should parse")
-	}
+	lower := LowerStrategies(map[string]gophlog.MaskingStrategy{"password": gophlog.HideAll})
+	masked := ProcessBody("user=alice&password=hunter2", formType, lower, nil, 1024, "request_", nil)
 	if strings.Contains(masked, "hunter2") {
 		t.Errorf("password should be masked: %s", masked)
 	}
 	if !strings.Contains(masked, "user=alice") {
 		t.Errorf("user should be preserved: %s", masked)
 	}
-	// Empty / unparseable.
-	if _, ok := MaskFormBody("", nil); ok {
-		t.Error("empty body should report ok=false")
+	if got := ProcessBody("", formType, lower, nil, 1024, "request_", nil); got != "" {
+		t.Errorf("empty body = %q; want empty", got)
 	}
 }
 

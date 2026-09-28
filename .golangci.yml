@@ -12,6 +12,14 @@ linters:
   # as `_ =` at the call site so the choice is visible in review.
   default: standard
 
+  # The checks Go Report Card used to run (the service was retired in 2026):
+  # misspell, golint (now revive), gocyclo and gofmt (under formatters below).
+  # go vet and ineffassign are already part of the standard set.
+  enable:
+    - gocyclo
+    - misspell
+    - revive
+
   settings:
     govet:
       disable:
@@ -19,5 +27,55 @@ linters:
         # use, which conflicts with the go 1.23 directive in go.mod.
         - inline
 
+    gocyclo:
+      # Go Report Card's threshold. It flags genuinely tangled functions
+      # without turning the request pipelines into a refactoring backlog.
+      min-complexity: 30
+
+    # No locale: the prose here uses British spelling ("behaviour"), which
+    # `locale: US` would report. Only outright misspellings are flagged.
+    misspell: {}
+
+    revive:
+      # Listing rules replaces revive's default set. This is that default set
+      # (the golint successor) minus unused-parameter, which only reports the
+      # idiomatic `func(w http.ResponseWriter, r *http.Request)` handlers in the
+      # tests and examples.
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: exported
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: var-declaration
+        - name: var-naming
+
   exclusions:
     generated: lax
+
+formatters:
+  # Reported by `golangci-lint run`; `golangci-lint fmt` applies the fixes.
+  # gofmt runs with simplify enabled (the default), i.e. `gofmt -s`.
+  enable:
+    - gofmt
+
+issues:
+  # Report every finding instead of the default 50 per linter / 3 per message,
+  # so a CI failure lists everything that needs fixing in one pass.
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -114,10 +114,10 @@ func TestMaskScalarNonStandardTypes(t *testing.T) {
 // character and always yields valid UTF-8.
 func TestTruncateUTF8Boundary(t *testing.T) {
 	s := strings.Repeat("ğ", 10) // 2 bytes each
-	for max := 1; max < len(s); max++ {
-		got := truncate(s, max)
+	for limit := 1; limit < len(s); limit++ {
+		got := truncate(s, limit)
 		if !utf8.ValidString(got) {
-			t.Fatalf("truncate(%d) produced invalid UTF-8: %q", max, got)
+			t.Fatalf("truncate(%d) produced invalid UTF-8: %q", limit, got)
 		}
 	}
 	if got := truncate("abc", 10); got != "abc" {

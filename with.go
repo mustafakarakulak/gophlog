@@ -21,6 +21,8 @@ type boundFields struct {
 
 	extra          map[string]any
 	maskStrategies map[string]MaskingStrategy
+	// extraTags is Entry.extraTags for the bound extras.
+	extraTags bool
 }
 
 // emptyBound is used when a logger has no bound fields, so build can read
@@ -110,7 +112,8 @@ func (w *With) Queue(info *QueueInfo) *With { w.bound.queue = info; return w }
 func (w *With) Job(info *JobInfo) *With { w.bound.job = info; return w }
 
 // Extra merges a map of searchable extra fields. Entry-level and payload
-// logextra fields with the same key override bound ones.
+// logextra fields with the same key override bound ones. Struct values honour
+// their `mask` tags, as with Entry.WithExtra.
 func (w *With) Extra(extra map[string]any) *With {
 	if len(extra) == 0 {
 		return w
@@ -120,16 +123,19 @@ func (w *With) Extra(extra map[string]any) *With {
 	}
 	for k, v := range extra {
 		w.bound.extra[k] = v
+		w.bound.extraTags = w.bound.extraTags || !plainExtraValue(v)
 	}
 	return w
 }
 
-// ExtraField binds a single searchable extra field.
+// ExtraField binds a single searchable extra field. Masking works as for
+// Extra.
 func (w *With) ExtraField(key string, value any) *With {
 	if w.bound.extra == nil {
 		w.bound.extra = make(map[string]any, 1)
 	}
 	w.bound.extra[key] = value
+	w.bound.extraTags = w.bound.extraTags || !plainExtraValue(value)
 	return w
 }
 

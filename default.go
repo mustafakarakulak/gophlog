@@ -37,5 +37,5 @@ func Warn(message, event string) *Entry { return Default().Warn(message, event) 
 func Error(message, event string) *Entry { return Default().Error(message, event) }
 
 // Fatal starts a FATAL entry on the default logger. It does NOT terminate the
-// process; the caller decides whether to exit after gophlog.
+// process; the caller decides whether to exit after logging.
 func Fatal(message, event string) *Entry { return Default().Fatal(message, event) }

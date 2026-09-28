@@ -3,9 +3,13 @@ package gophlog
 import (
 	"bytes"
 	"context"
+	"encoding"
 	"encoding/json"
 	"io"
+	"math"
 	"os"
+	"reflect"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -80,9 +84,9 @@ type Option func(*Logger)
 // WithWriter sets the destination writer (default os.Stdout).
 func WithWriter(w io.Writer) Option { return func(l *Logger) { l.core.w = w } }
 
-// WithMinLevel drops entries whose level is below min (default TRACE).
-func WithMinLevel(min Level) Option {
-	return func(l *Logger) { l.core.minLevel.Store(int32(min.severity())) }
+// WithMinLevel drops entries whose level is below minLevel (default TRACE).
+func WithMinLevel(minLevel Level) Option {
+	return func(l *Logger) { l.core.minLevel.Store(int32(minLevel.severity())) }
 }
 
 // WithTraceExtractor sets a function that resolves trace_id/span_id from the
@@ -108,8 +112,10 @@ func WithKubernetesFromEnv() Option {
 	}
 }
 
-// WithStackTraceLimit overrides the maximum stack-trace length (default 3000).
-func WithStackTraceLimit(max int) Option { return func(l *Logger) { l.core.stackLimit = max } }
+// WithStackTraceLimit caps stack traces at limit bytes (default 3000); the
+// "... [truncated]" marker is appended after the cut. A limit of zero or less
+// disables the cap.
+func WithStackTraceLimit(limit int) Option { return func(l *Logger) { l.core.stackLimit = limit } }
 
 // WithAutoTraceID makes the logger synthesize a random trace_id for entries that
 // resolve none from the entry, the context or the TraceExtractor.
@@ -123,6 +129,9 @@ func WithAutoTraceID() Option { return func(l *Logger) { l.core.autoTraceID = tr
 
 // WithOnError registers a callback invoked when the logger cannot do its job:
 // the writer returned an error, or a payload/entry could not be serialized.
+// It also hears about values the logger had to repair: a cycle cut with a
+// marker or a mask tag naming no strategy, in a payload or extra, and a NaN or
+// ±Inf. In IntegrationInfo bodies neither a cycle nor such a tag is reported.
 // Without it such failures are silent.
 //
 // The callback runs on the logging goroutine and must not log through this
@@ -159,10 +168,10 @@ func (l *Logger) enabledSeverity(sev int) bool {
 }
 
 // SetMinLevel changes the minimum level at runtime. It is safe to call
-// concurrently with gophlog. The level is shared with every logger derived via
+// concurrently with logging. The level is shared with every logger derived via
 // With, so changing it on a child changes it for the whole family.
-func (l *Logger) SetMinLevel(min Level) {
-	l.core.minLevel.Store(int32(min.severity()))
+func (l *Logger) SetMinLevel(minLevel Level) {
+	l.core.minLevel.Store(int32(minLevel.severity()))
 }
 
 // --- Fluent entry points ---------------------------------------------------
@@ -184,7 +193,7 @@ func (l *Logger) Error(message, event string) *Entry { return newEntry(l, ERROR,
 
 // Fatal starts a FATAL-level log entry. Unlike the standard library's
 // log.Fatal it does NOT terminate the process; the caller decides whether to
-// exit after gophlog.
+// exit after logging.
 func (l *Logger) Fatal(message, event string) *Entry { return newEntry(l, FATAL, message, event) }
 
 // At starts a log entry at an arbitrary level.
@@ -225,7 +234,7 @@ func (l *Logger) reportError(err error) {
 
 // emit builds the Event from an Entry and writes it as a single JSON line.
 func (l *Logger) emit(e *Entry) {
-	if !l.enabledSeverity(e.sev) {
+	if !l.enabledSeverity(e.severity()) {
 		return
 	}
 	event := l.build(e)
@@ -239,12 +248,23 @@ func (l *Logger) emit(e *Entry) {
 		}
 	}()
 
-	if err := enc.Encode(event); err != nil {
+	err := enc.Encode(event)
+	if err != nil {
 		l.reportError(err)
-		// Fall back to a minimal record so a bad payload/extra value never
-		// silently drops the log line entirely. Encode already wrote a partial
-		// object, so reset before re-encoding.
+		// Encode already wrote a partial object, so reset before re-encoding.
 		buf.Reset()
+		// A non-finite float (NaN, ±Inf) is the usual culprit and must not cost
+		// the rest of the entry: retry once with those rendered as strings.
+		if retry, ok := finiteEvent(event); ok {
+			if err = enc.Encode(retry); err != nil {
+				l.reportError(err)
+				buf.Reset()
+			}
+		}
+	}
+	if err != nil {
+		// Fall back to a minimal record so a bad payload/extra value never
+		// silently drops the log line entirely.
 		if encErr := enc.Encode(&Event{
 			Timestamp:    event.Timestamp,
 			Level:        event.Level,
@@ -259,12 +279,136 @@ func (l *Logger) emit(e *Entry) {
 		}
 	}
 
-	l.core.mu.Lock()
-	_, werr := l.core.w.Write(buf.Bytes())
-	l.core.mu.Unlock()
-	if werr != nil {
+	if werr := l.core.write(buf.Bytes()); werr != nil {
 		l.reportError(werr)
 	}
+}
+
+// write hands one rendered line to the writer under the core mutex. The unlock
+// is deferred so a panicking writer cannot leave the mutex held and deadlock
+// every later log call of the logger family; the panic itself still reaches
+// the caller.
+func (c *loggerCore) write(p []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err := c.w.Write(p)
+	return err
+}
+
+// finiteEvent returns a copy of ev that encodes despite non-finite floats, and
+// whether ev had any. In the free-form extra object they are written as "NaN",
+// "+Inf" or "-Inf". The typed duration fields are numeric in the index mapping,
+// where such a string would get the whole document rejected, so a non-finite
+// value there is omitted instead. ev is not modified: extra maps may be shared
+// with the caller or a derived logger.
+func finiteEvent(ev *Event) (*Event, bool) {
+	cp := *ev
+	changed := false
+	if len(ev.Extra) > 0 {
+		w := finiteWalk{budget: maxFiniteValues}
+		extra := make(map[string]any, len(ev.Extra))
+		for k, v := range ev.Extra {
+			if fv, ok := w.value(reflect.ValueOf(v), 0); ok {
+				v, changed = fv, true
+			}
+			extra[k] = v
+		}
+		cp.Extra = extra
+	}
+
+	if d := ev.DurationMs; d != nil {
+		if _, bad := nonFiniteString(*d); bad {
+			cp.DurationMs, changed = nil, true
+		}
+	}
+	if in := ev.Integration; in != nil && in.ExternalDurationMs != nil {
+		if _, bad := nonFiniteString(*in.ExternalDurationMs); bad {
+			c := *in
+			c.ExternalDurationMs = nil
+			cp.Integration, changed = &c, true
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	return &cp, true
+}
+
+// finiteWalk bounds the reflection walk behind finiteEvent: depth caps the
+// recursion and budget the number of values visited, so a cyclic or heavily
+// shared value cannot hang the fallback. Whatever the walk does not reach
+// keeps its non-finite floats and ends up in the minimal record.
+type finiteWalk struct{ budget int }
+
+const (
+	maxFiniteDepth  = 64
+	maxFiniteValues = 1 << 16
+)
+
+// value returns a copy of v with non-finite floats rendered as strings, and
+// whether it found any. It descends only through shapes whose JSON form it can
+// reproduce exactly (pointers, interfaces, slices, arrays and string-keyed
+// maps); structs and types with their own marshalers are left alone.
+func (w *finiteWalk) value(v reflect.Value, depth int) (any, bool) {
+	w.budget--
+	if w.budget < 0 || depth > maxFiniteDepth || !v.IsValid() || hasCustomJSON(v.Type()) {
+		return nil, false
+	}
+	switch v.Kind() {
+	case reflect.Float32, reflect.Float64:
+		return nonFiniteString(v.Float())
+	case reflect.Pointer, reflect.Interface:
+		if v.IsNil() {
+			return nil, false
+		}
+		return w.value(v.Elem(), depth+1)
+	case reflect.Slice, reflect.Array:
+		if v.Kind() == reflect.Slice && v.IsNil() {
+			return nil, false
+		}
+		out := make([]any, v.Len())
+		changed := false
+		for i := range out {
+			if fv, ok := w.value(v.Index(i), depth+1); ok {
+				out[i], changed = fv, true
+			} else {
+				out[i] = v.Index(i).Interface()
+			}
+		}
+		return out, changed
+	case reflect.Map:
+		if v.IsNil() || v.Type().Key().Kind() != reflect.String || hasCustomJSON(v.Type().Key()) {
+			return nil, false
+		}
+		out := make(map[string]any, v.Len())
+		changed := false
+		for it := v.MapRange(); it.Next(); {
+			if fv, ok := w.value(it.Value(), depth+1); ok {
+				out[it.Key().String()], changed = fv, true
+			} else {
+				out[it.Key().String()] = it.Value().Interface()
+			}
+		}
+		return out, changed
+	}
+	return nil, false
+}
+
+// hasCustomJSON reports whether encoding/json would render t (or an
+// addressable t) through a MarshalJSON or MarshalText method.
+func hasCustomJSON(t reflect.Type) bool {
+	jm, tm := reflect.TypeFor[json.Marshaler](), reflect.TypeFor[encoding.TextMarshaler]()
+	pt := reflect.PointerTo(t)
+	return t.Implements(jm) || t.Implements(tm) || pt.Implements(jm) || pt.Implements(tm)
+}
+
+// nonFiniteString renders NaN and ±Inf the way strconv does ("NaN", "+Inf",
+// "-Inf"); it reports false for a finite f.
+func nonFiniteString(f float64) (string, bool) {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return strconv.FormatFloat(f, 'g', -1, 64), true
+	}
+	return "", false
 }
 
 // build assembles the final Event, resolving trace context and rendering the
@@ -405,6 +549,18 @@ func (l *Logger) build(e *Entry) *Event {
 		ev.Extra = merged
 	}
 
+	// Struct values among the extras (WithExtra, bound extras, slog
+	// attributes) honour their mask tags as a payload does. Extras that cannot
+	// carry a tag are neither copied nor walked, and when every value was a
+	// plain one as it was added they are not even looked at. Fields lifted out
+	// of the payload need no check: the payload walk already rendered them.
+	if len(ev.Extra) > 0 && (e.extraTags || b.extraTags) {
+		var warn error
+		if ev.Extra, warn = maskTaggedExtra(ev.Extra); warn != nil {
+			l.reportError(warn)
+		}
+	}
+
 	return ev
 }
 
@@ -419,7 +575,12 @@ func (l *Logger) renderPayload(e *Entry, b *boundFields) (payload string, extra 
 	if e.payload == nil {
 		return "", nil, nil
 	}
-	normalized, extra := processPayload(e.payload)
+	normalized, extra, warn := processPayloadWarn(e.payload)
+	if warn != nil {
+		// A cycle or an unknown mask tag: the payload still renders (cut with
+		// a marker, or fully hidden), but the caller should hear about it.
+		l.reportError(warn)
+	}
 	// Both maps are lower-cased on insert, so the lookup map never has to be
 	// rebuilt at emit time. Entry strategies override bound ones per key.
 	strategies := e.maskStrategies
@@ -465,17 +626,17 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// truncate cuts s at max bytes and appends a truncation marker. The marker is
-// additive — output may exceed max by its length — so the cap is on the
+// truncate cuts s at limit bytes and appends a truncation marker. The marker is
+// additive — output may exceed limit by its length — so the cap is on the
 // retained content, not the rendered string; CapBody in internal/httplog
 // follows the same convention.
-func truncate(s string, max int) string {
-	if max <= 0 || len(s) <= max {
+func truncate(s string, limit int) string {
+	if limit <= 0 || len(s) <= limit {
 		return s
 	}
 	// Back up to a rune boundary so the cut never splits a multi-byte
 	// character and produces an invalid string.
-	cut := max
+	cut := limit
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
