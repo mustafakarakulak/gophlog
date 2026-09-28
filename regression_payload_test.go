@@ -19,7 +19,9 @@ import (
 
 const (
 	// walkBudget is how long one of the pathological walks below may take.
-	walkBudget = 100 * time.Millisecond
+	// The fixed walks finish in well under a millisecond; the headroom is for
+	// the race detector on shared CI runners, where they take ~160ms.
+	walkBudget = time.Second
 	// walkHangTimeout is when a walk is declared runaway. The test fails
 	// right away rather than waiting on it, so the suite never locks up.
 	walkHangTimeout = 2 * time.Second
