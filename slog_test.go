@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
+	"testing/slogtest"
 	"time"
 )
 
@@ -155,6 +157,53 @@ func TestSlogHonorsRecordTime(t *testing.T) {
 	m := parseLine(t, &buf)
 	if m["timestamp"] != "2020-01-02T03:04:05.000Z" {
 		t.Errorf("record time should be honored, got %v", m["timestamp"])
+	}
+}
+
+// TestSlogHandlerConformance runs the standard testing/slogtest suite against
+// the adapter, pinning the documented claim that it passes. Each line is mapped
+// onto slogtest's shape: timestamp/level/message become the built-in keys and
+// the extra object supplies the attributes.
+func TestSlogHandlerConformance(t *testing.T) {
+	var buf bytes.Buffer
+	slogtest.Run(t,
+		func(t *testing.T) slog.Handler {
+			if strings.HasSuffix(t.Name(), "/zero-time") {
+				// The documented exception (see NewSlogHandler): every line carries
+				// a timestamp, so a zero Record.Time falls back to the logger clock
+				// instead of being omitted. TestSlogZeroRecordTimeUsesClock pins it.
+				t.Skip("this format always emits a timestamp")
+			}
+			buf.Reset()
+			return NewSlogHandler(newTestLogger(&buf), nil)
+		},
+		func(t *testing.T) map[string]any {
+			m := parseLine(t, &buf)
+			got := map[string]any{
+				slog.TimeKey:    m["timestamp"],
+				slog.LevelKey:   m["level"],
+				slog.MessageKey: m["message"],
+			}
+			if extra, ok := m["extra"].(map[string]any); ok {
+				for k, v := range extra {
+					got[k] = v
+				}
+			}
+			return got
+		},
+	)
+}
+
+func TestSlogZeroRecordTimeUsesClock(t *testing.T) {
+	var buf bytes.Buffer
+	h := NewSlogHandler(newTestLogger(&buf), nil) // fixed clock at 2026-01-11
+
+	if err := h.Handle(context.Background(), slog.NewRecord(time.Time{}, slog.LevelInfo, "t", 0)); err != nil {
+		t.Fatal(err)
+	}
+
+	if m := parseLine(t, &buf); m["timestamp"] != "2026-01-11T00:15:34.123Z" {
+		t.Errorf("a zero record time should fall back to the logger clock, got %v", m["timestamp"])
 	}
 }
 

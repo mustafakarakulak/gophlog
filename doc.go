@@ -13,6 +13,9 @@
 //     log.With().Category("payments").Tenant("acme").Logger().
 //   - net/http server middleware and an http.RoundTripper for outbound calls,
 //     both with automatic request/response logging and masking.
+//   - A log/slog adapter: NewSlogHandler and NewSlogLogger write slog records
+//     in the same JSON format, with attributes in the searchable `extra`
+//     object.
 //   - Failures are never silent: WithOnError surfaces write and serialization
 //     errors instead of dropping log lines quietly.
 //
@@ -32,6 +35,13 @@
 //	}
 //
 // `creditCard` is masked in place; `txnId` is moved into the searchable
-// `extra` object. The payload renders exactly as encoding/json would render the
-// same value, including `omitempty` and embedded-struct handling.
+// `extra` object. Otherwise the payload follows the encoding/json rules for
+// the same value — `json` names, `json:"-"`, `omitempty` and embedded-struct
+// handling — with one difference: object keys are written sorted, the way
+// encoding/json orders map keys, so struct fields do not keep their
+// declaration order.
+//
+// A `mask` value that names no strategy hides the field entirely. `mask` tags
+// also apply to struct values passed as extras, slog attributes and
+// IntegrationInfo bodies.
 package gophlog

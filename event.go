@@ -1,6 +1,10 @@
 package gophlog
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"sync"
+)
 
 // Event is the structured log record emitted as a single line of JSON.
 //
@@ -68,11 +72,44 @@ func stringifyJSON(v any) (string, error) {
 	if s, ok := v.(string); ok {
 		return s, nil
 	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return "", err
+	return encodeJSON(v)
+}
+
+// nestedPool recycles the buffers nested JSON values (payloads, integration
+// bodies) are rendered into. Its encoders keep <, > and & literal, like the
+// encoder the log line itself is written with, so a stringified value reads
+// the same as the envelope around it.
+var nestedPool = sync.Pool{New: func() any {
+	lb := &lineBuffer{}
+	lb.enc = json.NewEncoder(&lb.buf)
+	lb.enc.SetEscapeHTML(false)
+	return lb
+}}
+
+// encodeNested renders v as compact JSON into a pooled buffer and passes the
+// bytes to use, which must not retain them.
+func encodeNested(v any, use func([]byte)) error {
+	lb := nestedPool.Get().(*lineBuffer)
+	defer func() {
+		if lb.buf.Cap() <= maxPooledBuffer {
+			lb.buf.Reset()
+			nestedPool.Put(lb)
+		}
+	}()
+	if err := lb.enc.Encode(v); err != nil {
+		return err
 	}
-	return string(b), nil
+	b := lb.buf.Bytes()
+	use(b[:len(b)-1]) // Encode terminates the value with a newline
+	return nil
+}
+
+// encodeJSON renders v as a compact JSON string, copying it out of the pooled
+// buffer once (json.Marshal would copy twice: into its result, then into the
+// string).
+func encodeJSON(v any) (s string, err error) {
+	err = encodeNested(v, func(b []byte) { s = string(b) })
+	return s, err
 }
 
 // renderFailure is written in place of a value that cannot be serialized, so the
@@ -93,7 +130,8 @@ func stringifyOrFailure(v any) string {
 }
 
 // MarshalJSON renders IntegrationInfo with request_body/response_body as
-// stringified JSON (a JSON string whose content is itself JSON).
+// stringified JSON (a JSON string whose content is itself JSON). Struct values
+// in the bodies honour their mask tags, as a payload does.
 func (i IntegrationInfo) MarshalJSON() ([]byte, error) {
 	type alias struct {
 		Target             string            `json:"target,omitempty"`
@@ -110,12 +148,14 @@ func (i IntegrationInfo) MarshalJSON() ([]byte, error) {
 		RetryCount:         i.RetryCount,
 	}
 	if i.RequestBody != nil {
-		s := stringifyOrFailure(i.RequestBody)
+		s := stringifyOrFailure(maskTaggedValue(i.RequestBody))
 		a.RequestBody = &s
 	}
 	if i.ResponseBody != nil {
-		s := stringifyOrFailure(i.ResponseBody)
+		s := stringifyOrFailure(maskTaggedValue(i.ResponseBody))
 		a.ResponseBody = &s
 	}
-	return json.Marshal(a)
+	var out []byte
+	err := encodeNested(a, func(b []byte) { out = bytes.Clone(b) })
+	return out, err
 }

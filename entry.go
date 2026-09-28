@@ -2,6 +2,7 @@ package gophlog
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"runtime"
 	"strconv"
@@ -17,7 +18,7 @@ type Entry struct {
 	logger  *Logger
 	ctx     context.Context
 	level   Level
-	sev     int // level.severity(), resolved once at creation
+	sev     int // level.severity(); -1 until severity() resolves a non-canonical name
 	message string
 	event   string
 	ts      time.Time // optional timestamp override; zero means use the logger clock
@@ -27,6 +28,9 @@ type Entry struct {
 	logType        LogType
 	category       string
 	extra          map[string]any
+	// extraTags is set once an extra value that is not a plain value (see
+	// plainExtraValue) is added: only then can the extras hold a mask tag.
+	extraTags bool
 
 	errorType    string
 	errorMessage string
@@ -61,7 +65,18 @@ type Entry struct {
 }
 
 func newEntry(l *Logger, level Level, message, event string) *Entry {
-	return &Entry{logger: l, level: level, sev: level.severity(), message: message, event: event}
+	return &Entry{logger: l, level: level, sev: level.canonicalSeverity(), message: message, event: event}
+}
+
+// severity returns the entry's severity. A level spelled other than
+// canonically (e.g. "error") is resolved here on first use rather than in
+// newEntry, whose inlining keeps the Entry off the heap; resolving also
+// rewrites a known name to its canonical spelling for the emitted line.
+func (e *Entry) severity() int {
+	if e.sev < 0 {
+		e.level, e.sev = e.level.resolve()
+	}
+	return e.sev
 }
 
 // Ctx attaches a context so trace/correlation IDs and propagated metadata are
@@ -125,19 +140,20 @@ func (e *Entry) WithCategory(category string) *Entry {
 
 // WithError attaches error type, message and a captured stack trace.
 //
-// The stack is only captured when the entry's level would actually be emitted,
-// so a disabled-level error log never pays for the (relatively expensive) trace.
+// Nothing is recorded when the entry's level would not be emitted, so a
+// disabled-level error log never pays for the type lookup, the Error() call or
+// the (relatively expensive) stack trace. The level is checked when WithError
+// is called: if the minimum level is lowered before Log, the entry is written
+// without its error fields.
 func (e *Entry) WithError(err error) *Entry {
-	if err == nil {
+	if err == nil || !e.logger.enabledSeverity(e.severity()) {
 		return e
 	}
 	e.errorType = errorTypeName(err)
-	e.errorMessage = err.Error()
-	if e.logger.enabledSeverity(e.sev) {
-		// skip=2 → start the trace at the caller of WithError (the user's code),
-		// not at runtime internals.
-		e.stackTrace = captureStack(2)
-	}
+	e.errorMessage = errorString(err)
+	// skip=2 → start the trace at the caller of WithError (the user's code),
+	// not at runtime internals.
+	e.stackTrace = captureStack(2)
 	return e
 }
 
@@ -147,7 +163,9 @@ func (e *Entry) WithStackTrace(stack string) *Entry {
 	return e
 }
 
-// WithExtra merges a map of searchable extra fields.
+// WithExtra merges a map of searchable extra fields. Struct values honour their
+// `mask` tags, as in a payload; name-based strategies (Mask, MaskMany) do not
+// apply to these values.
 func (e *Entry) WithExtra(extra map[string]any) *Entry {
 	if len(extra) == 0 {
 		return e
@@ -157,16 +175,19 @@ func (e *Entry) WithExtra(extra map[string]any) *Entry {
 	}
 	for k, v := range extra {
 		e.extra[k] = v
+		e.extraTags = e.extraTags || !plainExtraValue(v)
 	}
 	return e
 }
 
-// WithExtraField sets a single searchable extra field.
+// WithExtraField sets a single searchable extra field. Masking works as for
+// WithExtra.
 func (e *Entry) WithExtraField(key string, value any) *Entry {
 	if e.extra == nil {
 		e.extra = make(map[string]any, 1)
 	}
 	e.extra[key] = value
+	e.extraTags = e.extraTags || !plainExtraValue(value)
 	return e
 }
 
@@ -316,6 +337,23 @@ func errorTypeName(err error) string {
 		return "error"
 	}
 	return name
+}
+
+// errorString returns err.Error() without letting a faulty Error method crash
+// the caller. It mirrors fmt: when the method panics on a nil pointer receiver
+// (a typed-nil error) the result is "<nil>", any other panic is rendered as a
+// "%!v(PANIC=Error method: ...)" marker.
+func errorString(err error) (s string) {
+	defer func() {
+		if r := recover(); r != nil {
+			if v := reflect.ValueOf(err); v.Kind() == reflect.Pointer && v.IsNil() {
+				s = "<nil>"
+				return
+			}
+			s = "%!v(PANIC=Error method: " + fmt.Sprint(r) + ")"
+		}
+	}()
+	return err.Error()
 }
 
 // captureStack renders the calling goroutine's stack, skipping `skip` frames.

@@ -449,9 +449,10 @@ func TestTransportRedactsURLPassword(t *testing.T) {
 	if strings.Contains(curl.String(), "PW-HUNTER2") {
 		t.Errorf("curl output leaked the URL password:\n%s", curl.String())
 	}
-	// The username survives, redacted-password style (mirrors url.Redacted).
-	if !strings.Contains(logs.String(), "alice:xxxxx@") {
-		t.Errorf("log line should keep the redacted userinfo: %s", logs.String())
+	// The username is redacted too: token-as-username schemes
+	// (https://<token>:x-oauth-basic@github.com) put the secret there.
+	if !strings.Contains(logs.String(), "//xxxxx:xxxxx@") || strings.Contains(logs.String(), "alice") {
+		t.Errorf("log line should carry fully redacted userinfo: %s", logs.String())
 	}
 }
 

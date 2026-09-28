@@ -12,6 +12,15 @@ on:
 permissions:
   contents: read
 
+# Actions are pinned to full commit SHAs (the comment names the release);
+# Dependabot keeps both up to date. Tools installed with `go install` / `go run`
+# are pinned here and bumped by hand.
+env:
+  GOLANGCI_LINT_VERSION: v2.14.0
+  GOVULNCHECK_VERSION: v1.8.0
+  # golang.org/x/exp has no tagged releases; this is the 2026-09-08 commit.
+  GORELEASE_VERSION: v0.0.0-20260908205506-85c1c2202aba
+
 jobs:
   test:
     name: Test (${{ matrix.os }}, Go ${{ matrix.go }})
@@ -20,16 +29,22 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        go: ['1.23', 'stable']
+        # The go.mod minimum plus the two supported Go releases.
+        go: ['1.23', 'oldstable', 'stable']
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go }}
           check-latest: true
+          # The module has no dependencies and therefore no go.sum, which is
+          # what setup-go keys its cache on; with caching on it only warns.
+          cache: false
 
       - name: Build
         run: go build ./...
@@ -51,45 +66,121 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           check-latest: true
-
-      - name: Verify gofmt
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "These files are not gofmt'd:"
-            echo "$unformatted"
-            exit 1
-          fi
+          cache: false
 
       - name: go vet
         run: go vet ./...
 
+      # Formatting is checked here too: .golangci.yml enables the gofmt
+      # formatter (with simplify, i.e. `gofmt -s`), so a separate gofmt step
+      # would only report the same files twice.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.13.1
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
 
   vulncheck:
     name: govulncheck
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           check-latest: true
+          cache: false
 
+      # Run directly rather than through golang/govulncheck-action, which
+      # installs govulncheck@latest internally and so cannot be pinned.
       - name: govulncheck
+        run: go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...
+
+  fuzz:
+    name: Fuzz (smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+          cache: false
+
+      # `go test -fuzz` accepts one package and one target at a time, so every
+      # Fuzz* function is discovered per package and run on its own. All targets
+      # run even after a failure, so every crasher reaches the artifact below.
+      # -fuzzminimizetime caps minimizing new inputs, which slowed FuzzMaskString.
+      - name: Run fuzz targets (20s each)
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+          status=0
+          found=0
+          for pkg in $(go list ./...); do
+            list="$(go test -list '^Fuzz' "$pkg")"
+            for name in $(printf '%s\n' "$list" | grep '^Fuzz' || true); do
+              found=$((found + 1))
+              echo "::group::$pkg $name"
+              if ! go test -run '^$' -fuzz "^${name}\$" -fuzztime=20s -fuzzminimizetime=5s "$pkg"; then
+                echo "::error::$name in $pkg failed"
+                status=1
+              fi
+              echo "::endgroup::"
+            done
+          done
+          echo "Ran $found fuzz target(s)."
+          exit "$status"
+
+      # A failing input is written to testdata/fuzz/<Target>/ in the package
+      # directory; add it to that directory to reproduce with a plain `go test`.
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-corpus
+          path: '**/testdata/fuzz/**'
+          if-no-files-found: ignore
+
+  api:
+    name: API compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history and tags, to find the latest release tag.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+          cache: false
+
+      # gorelease exits non-zero when the exported API changed incompatibly
+      # since the latest release tag, which the v1 guarantee rules out.
+      - name: gorelease
+        run: |
+          base="$(git describe --tags --abbrev=0 --match 'v[0-9]*')"
+          echo "Comparing against $base"
+          go run "golang.org/x/exp/cmd/gorelease@${GORELEASE_VERSION}" -base="$base"

@@ -1,0 +1,19 @@
+version: 2
+
+updates:
+  # The workflows pin actions to commit SHAs; Dependabot bumps the SHA together
+  # with its version comment.
+  #
+  # There is no gomod entry on purpose: the module has no dependencies (no
+  # go.sum), so it would never open a pull request. Add one if a dependency is
+  # ever introduced. Go toolchain advisories are covered by the weekly
+  # govulncheck run in CI.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ['*']
+    commit-message:
+      prefix: CI

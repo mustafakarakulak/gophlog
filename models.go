@@ -3,7 +3,12 @@ package gophlog
 // IntegrationInfo holds metadata about an external integration call.
 //
 // RequestBody and ResponseBody are rendered as stringified JSON in the final
-// log output (a JSON string whose content is itself JSON).
+// log output (a JSON string whose content is itself JSON); a string is written
+// unchanged. Struct values in them honour their `mask` tags, as in a payload;
+// name-based strategies do not reach them. Problems are not reported to
+// WithOnError: a tag naming no strategy hides the field, a cycle through
+// map[string]any / []any values or tagged structs is cut with a marker, and
+// any other unserializable value is written as "[unserializable: ...]".
 type IntegrationInfo struct {
 	Target             string            `json:"target,omitempty"`
 	Status             IntegrationStatus `json:"status,omitempty"`

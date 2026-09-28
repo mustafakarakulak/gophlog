@@ -8,9 +8,12 @@ import (
 )
 
 // MaskingStrategy defines how a sensitive value is partially or fully masked.
+// The values double as `mask` struct tag values, matched case-insensitively; a
+// tag naming no strategy, or an empty one, hides the field as "hideall" does.
 //
 // For the fully hidden ("hideall") strategy the masked portion is capped at 8
-// asterisks so the output never reveals the secret's length.
+// asterisks, so the output does not reveal the length of a longer secret; a
+// value of up to 8 characters gets one asterisk per character.
 type MaskingStrategy string
 
 const (
@@ -35,7 +38,7 @@ const (
 	// ShowFirst2AndLast2 shows the first 2 and last 2 characters. Example: "12*******32"
 	ShowFirst2AndLast2 MaskingStrategy = "showfirst2andlast2"
 	// CreditCard shows the first 6 and last 4 digits (BIN + last four).
-	// Example: "5101521234564582" -> "510152 ****** 4582" (grouped).
+	// Example: "5101521234564582" -> "5101 52 **** ** 4582" (grouped).
 	CreditCard MaskingStrategy = "creditcard"
 )
 
@@ -184,11 +187,13 @@ func maskCreditCard(value string) string {
 // masked number is emitted as a JSON string rather than a number.
 //
 // Decoded-JSON containers (map[string]any / []any) are returned unchanged —
-// callers deep-mask them via maskScalarOrRecurse. Every other type is masked
-// fail-closed: named scalar types and non-standard numeric widths are rendered
-// via reflection, opaque values (json.Marshaler implementations such as
-// time.Time) are rendered to JSON first, and a value that cannot be rendered at
-// all is fully hidden rather than logged in the clear.
+// callers deep-mask them via maskScalarOrRecurseInPlace or MaskJSON. Every
+// other type is masked fail-closed: named scalar types and non-standard numeric
+// widths are rendered via reflection, opaque values (json.Marshaler and
+// encoding.TextMarshaler implementations such as time.Time) are rendered to
+// JSON first — so what is masked is what would have been printed, never a raw
+// value the marshaler hides — and a value that cannot be rendered at all is
+// fully hidden rather than logged in the clear.
 func maskScalar(value any, strategy MaskingStrategy) any {
 	switch v := value.(type) {
 	case nil:
@@ -206,24 +211,27 @@ func maskScalar(value any, strategy MaskingStrategy) any {
 
 	// Named scalar types and the remaining numeric widths.
 	rv := reflect.ValueOf(value)
-	switch rv.Kind() {
-	case reflect.Bool:
-		return MaskString(strconv.FormatBool(rv.Bool()), strategy)
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return MaskString(strconv.FormatInt(rv.Int(), 10), strategy)
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		return MaskString(strconv.FormatUint(rv.Uint(), 10), strategy)
-	case reflect.Float32, reflect.Float64:
-		return MaskString(strconv.FormatFloat(rv.Float(), 'f', -1, 64), strategy)
-	case reflect.String:
-		if rv.String() == "" {
-			return ""
+	if opaqueOf(rv.Type()) != opaqueAlways {
+		switch rv.Kind() {
+		case reflect.Bool:
+			return MaskString(strconv.FormatBool(rv.Bool()), strategy)
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return MaskString(strconv.FormatInt(rv.Int(), 10), strategy)
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			return MaskString(strconv.FormatUint(rv.Uint(), 10), strategy)
+		case reflect.Float32, reflect.Float64:
+			return MaskString(strconv.FormatFloat(rv.Float(), 'f', -1, 64), strategy)
+		case reflect.String:
+			if rv.String() == "" {
+				return ""
+			}
+			return MaskString(rv.String(), strategy)
 		}
-		return MaskString(rv.String(), strategy)
 	}
 
-	// Opaque values (json.Marshaler, time.Time, ...): mask the rendered JSON
-	// text, unquoting strings so quote characters never count as visible chars.
+	// Opaque values (json.Marshaler, encoding.TextMarshaler, time.Time, ...):
+	// mask the rendered JSON text, unquoting strings so quote characters never
+	// count as visible chars.
 	b, err := json.Marshal(value)
 	if err != nil {
 		return "********"
@@ -248,9 +256,21 @@ func maskScalar(value any, strategy MaskingStrategy) any {
 // masks any field whose name matches one of the provided strategies
 // (case-insensitive), recursing into nested objects and arrays. It is the
 // exported entry point used by the middleware and httpclient subpackages.
+//
+// A strategy for a field holding an object or array masks every scalar
+// beneath it. With no strategies, value is returned as is; otherwise the
+// result is a masked copy and value is not modified. A map or slice that
+// contains itself is cut with "[cycle: max depth exceeded]", and nesting
+// deeper than 10000 levels with "[max depth exceeded]".
 func MaskJSON(value any, strategies map[string]MaskingStrategy) any {
 	return applyMaskingToJSON(value, strategies)
 }
+
+// maxMaskJSONDepth bounds MaskJSON's walk. It matches the nesting limit of
+// encoding/json's decoder, so every document json.Unmarshal can produce is
+// masked in full; only a tree assembled by hand can nest deeper, and past the
+// limit it is cut with depthMarker rather than recursed into without bound.
+const maxMaskJSONDepth = 10000
 
 // applyMaskingToJSON walks a decoded JSON value (map / slice / scalar) and
 // masks any field whose name matches one of the provided strategies
@@ -264,31 +284,107 @@ func applyMaskingToJSON(value any, strategies map[string]MaskingStrategy) any {
 	for k, s := range strategies {
 		lower[strings.ToLower(k)] = s
 	}
-	return applyMaskingLower(value, lower)
+	m := jsonMasker{lower: lower}
+	return m.walk(value, 0)
 }
 
-func applyMaskingLower(value any, lower map[string]MaskingStrategy) any {
+// jsonMasker is the copying walk behind MaskJSON. Its input belongs to the
+// caller and may have been assembled by hand rather than decoded, so — unlike
+// the in-place walks over trees processPayload built — it is guarded against
+// a container that contains itself (cut with cycleMarker, as payloads are) and
+// against unbounded nesting (maxMaskJSONDepth).
+type jsonMasker struct {
+	lower map[string]MaskingStrategy
+	path  pathGuard
+}
+
+func (m *jsonMasker) walk(value any, depth int) any {
 	switch v := value.(type) {
 	case map[string]any:
+		k, stop := m.enter(value, len(v), depth)
+		if stop != nil {
+			return stop
+		}
 		out := make(map[string]any, len(v))
 		for key, val := range v {
-			if strategy, ok := lower[strings.ToLower(key)]; ok {
-				out[key] = maskScalarOrRecurse(val, strategy)
-			} else if isContainer(val) {
-				out[key] = applyMaskingLower(val, lower)
+			if strategy, ok := m.lower[strings.ToLower(key)]; ok {
+				out[key] = m.maskAll(val, strategy, depth+1)
 			} else {
-				out[key] = val
+				out[key] = m.walk(val, depth+1)
 			}
 		}
+		m.leave(k, len(v))
 		return out
 	case []any:
+		k, stop := m.enter(value, len(v), depth)
+		if stop != nil {
+			return stop
+		}
 		out := make([]any, len(v))
 		for i, item := range v {
-			out[i] = applyMaskingLower(item, lower)
+			out[i] = m.walk(item, depth+1)
 		}
+		m.leave(k, len(v))
 		return out
 	default:
 		return value
+	}
+}
+
+// maskAll masks every scalar leaf under a field the strategy targets, so an
+// explicitly-targeted container can never leak values through field names the
+// strategy map does not know about.
+func (m *jsonMasker) maskAll(val any, strategy MaskingStrategy, depth int) any {
+	switch v := val.(type) {
+	case map[string]any:
+		k, stop := m.enter(val, len(v), depth)
+		if stop != nil {
+			return stop
+		}
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			out[key] = m.maskAll(item, strategy, depth+1)
+		}
+		m.leave(k, len(v))
+		return out
+	case []any:
+		k, stop := m.enter(val, len(v), depth)
+		if stop != nil {
+			return stop
+		}
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = m.maskAll(item, strategy, depth+1)
+		}
+		m.leave(k, len(v))
+		return out
+	default:
+		return maskScalar(val, strategy)
+	}
+}
+
+// enter records a container holding n entries on the walk path. It returns
+// the marker to render instead when the container sits too deep or is
+// already on the path. An empty container cannot hold itself and is not
+// recorded.
+func (m *jsonMasker) enter(container any, n, depth int) (visitKey, any) {
+	if depth > maxMaskJSONDepth {
+		return visitKey{}, depthMarker
+	}
+	if n == 0 {
+		return visitKey{}, nil
+	}
+	rv := reflect.ValueOf(container)
+	k := visitKey{ptr: rv.Pointer(), n: n, typ: rv.Type()}
+	if !m.path.enter(k) {
+		return visitKey{}, cycleMarker
+	}
+	return k, nil
+}
+
+func (m *jsonMasker) leave(k visitKey, n int) {
+	if n > 0 {
+		m.path.leave(k)
 	}
 }
 
@@ -315,32 +411,13 @@ func applyMaskingLowerInPlace(value any, lower map[string]MaskingStrategy) {
 	}
 }
 
-// maskScalarOrRecurse masks scalars; when the strategy targets a field that
-// holds an object or array, every scalar leaf underneath it is masked with the
-// same strategy, so an explicitly-targeted container can never leak values
-// through field names the strategy map does not know about.
-func maskScalarOrRecurse(val any, strategy MaskingStrategy) any {
-	switch v := val.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(v))
-		for key, item := range v {
-			out[key] = maskScalarOrRecurse(item, strategy)
-		}
-		return out
-	case []any:
-		out := make([]any, len(v))
-		for i, item := range v {
-			out[i] = maskScalarOrRecurse(item, strategy)
-		}
-		return out
-	default:
-		return maskScalar(val, strategy)
-	}
-}
-
-// maskScalarOrRecurseInPlace is maskScalarOrRecurse for exclusively-owned
-// trees: targeted containers are masked leaf-by-leaf in place instead of being
-// copied node by node.
+// maskScalarOrRecurseInPlace masks scalars; when the strategy targets a field
+// that holds an object or array, every scalar leaf underneath it is masked with
+// the same strategy, so an explicitly-targeted container can never leak values
+// through field names the strategy map does not know about. It runs on
+// exclusively-owned trees built by processPayload, so targeted containers are
+// masked leaf-by-leaf in place instead of being copied node by node; MaskJSON
+// does the same over caller data with a copying, guarded walk.
 func maskScalarOrRecurseInPlace(val any, strategy MaskingStrategy) any {
 	switch v := val.(type) {
 	case map[string]any:

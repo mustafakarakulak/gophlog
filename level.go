@@ -1,8 +1,12 @@
 package gophlog
 
+import "strings"
+
 // Level represents the severity of a log entry.
 //
-// Levels are serialized to JSON as upper-case strings (e.g. "INFO").
+// Levels are serialized to JSON as upper-case strings (e.g. "INFO"). Level
+// names are matched case-insensitively, so Level("error") is ERROR; any other
+// value is written as given and filtered as INFO.
 type Level string
 
 const (
@@ -20,9 +24,21 @@ const (
 	FATAL Level = "FATAL"
 )
 
+// levelsBySeverity lists the levels in severity order; a level's index is its
+// severity.
+var levelsBySeverity = [...]Level{TRACE, DEBUG, INFO, WARN, ERROR, FATAL}
+
 // severity returns a numeric ordering for the level so loggers can filter
 // out entries below a configured minimum level.
 func (l Level) severity() int {
+	_, sev := l.resolve()
+	return sev
+}
+
+// canonicalSeverity is the call-free fast path of resolve: the severity of a
+// canonically spelled level, or -1 for any other value. It stays cheap enough
+// for newEntry, and with it the entry points, to be inlined.
+func (l Level) canonicalSeverity() int {
 	switch l {
 	case TRACE:
 		return 0
@@ -36,9 +52,23 @@ func (l Level) severity() int {
 		return 4
 	case FATAL:
 		return 5
-	default:
-		return 2
 	}
+	return -1
+}
+
+// resolve returns the level to write for l and its severity. Level names match
+// case-insensitively, so Level("error") filters and is written as ERROR; any
+// other value keeps its own spelling and filters as INFO.
+func (l Level) resolve() (Level, int) {
+	if sev := l.canonicalSeverity(); sev >= 0 {
+		return l, sev
+	}
+	for sev, lv := range levelsBySeverity {
+		if strings.EqualFold(string(l), string(lv)) {
+			return lv, sev
+		}
+	}
+	return l, 2
 }
 
 // LogType categorizes a log entry. It is serialized as a lower-case string.

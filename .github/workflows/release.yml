@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # For a tag that was pushed before this workflow existed (or whose run
+  # failed): Actions → Release → Run workflow, with the existing tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish a release for, e.g. v1.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+
+      # Fails when CHANGELOG.md at the tag has no section for this version, so
+      # a release is never published without its notes.
+      - name: Extract release notes
+        run: |
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "::error::$TAG is not a version tag"; exit 1 ;;
+          esac
+          sh .github/scripts/changelog-notes.sh "$TAG" CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          flags=(--verify-tag --title "gophlog $TAG" --notes-file "$RUNNER_TEMP/notes.md")
+          case "$TAG" in
+            *-*) flags+=(--prerelease) ;; # v1.2.0-rc.1 and the like
+          esac
+          gh release create "$TAG" "${flags[@]}"

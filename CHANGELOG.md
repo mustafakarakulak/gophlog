@@ -8,6 +8,175 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-09-28
+
+Security and bug fixes. The exported API is unchanged, but several fixes change
+the log output; most importantly, values that used to be written in the clear
+are now masked, redacted or replaced by a marker (see Security).
+
+### Security
+
+- `mask` tags now apply outside the payload: struct values in `WithExtra` /
+  `WithExtraField`, bound extras, `slog` attributes and `IntegrationInfo`
+  request/response bodies are masked by their tags, also inside maps and
+  slices. They used to be written in the clear. Name-based strategies (`Mask`,
+  `MaskMany`, `WithPayloadMasked`) still apply to the payload only, and a
+  `logextra` tag outside a payload leaves the field in place.
+- An unrecognised or empty `mask` tag value (`mask:"hide"`, `mask:""`) now
+  hides the field entirely, as `hideall` does, and in a payload or extra is
+  reported to `WithOnError` (in an `IntegrationInfo` body it is only hidden).
+  It used to leave the value in the clear.
+- Payloads honour pointer-receiver `MarshalJSON` / `MarshalText` and
+  `encoding.TextMarshaler` as `encoding/json` does, so a type that hides a
+  secret in its marshaler is no longer rendered field by field. A `mask` tag on
+  such a type masks the rendered text.
+- middleware, httpclient: a body with a `Content-Encoding` other than
+  `identity` is no longer logged raw — masking cannot see into it, and a short
+  gzip body is a stored block carrying the plain text. It is logged as
+  `[body not logged: non-identity Content-Encoding]`, with or without masking.
+- middleware, httpclient: with masking configured, a form body that fails to
+  parse (`x=%zz`, `;` separators), or that parses both as a form with a masked
+  field and as JSON, is logged as `[body not logged: cannot be masked]`
+  instead of unmasked.
+- httpclient: URL userinfo is redacted in full, username included:
+  `https://user:pass@host` → `https://xxxxx:xxxxx@host` (was `user:xxxxx@`) and
+  `https://<token>@host` → `https://xxxxx@host` (was logged as-is). The URL
+  fragment is dropped from `http_path`, the message and the curl dump.
+- httpclient: the curl dump also redacts `Private-Token`, `X-Goog-Api-Key`,
+  `X-Amz-Security-Token`, `Ocp-Apim-Subscription-Key`, `Apikey`,
+  `X-Csrf-Token` and `X-Xsrf-Token`.
+- middleware: an inbound workflow header is dropped when it is longer than
+  1000 bytes, not valid UTF-8, or contains control, line/paragraph-separator or
+  bidi embedding/override/isolate characters. Other values, including `/`, `@`
+  and spaces, are still accepted.
+
+### Fixed
+
+- A panicking writer no longer leaves the logger's mutex locked, which
+  deadlocked every later log call of the logger and its children.
+- A typed-nil error, or one whose `Error` method panics, no longer crashes
+  `WithError` or the `slog` adapter; it is rendered as `<nil>` or
+  `%!v(PANIC=Error method: …)`, as `fmt` does.
+- A NaN or ±Inf value no longer reduces the entry to the minimal record: in
+  `extra` and `slog` attributes it is written as `"NaN"`, `"+Inf"` or `"-Inf"`,
+  and a non-finite `duration_ms` or `integration.external_duration_ms` is
+  omitted. All other fields are kept.
+- Level names are matched case-insensitively: `Level("error")` filters as
+  `ERROR` and is written as `ERROR` (it was filtered as `INFO` and written as
+  given). Unrecognised values are still written unchanged and filtered as
+  `INFO`.
+- `WithError` does no work when the entry's level is disabled: no type lookup,
+  `Error()` call or stack capture (about 2.7× faster in
+  `BenchmarkDisabledLevel`). Note: if the minimum level is lowered after
+  `WithError` but before `Log`, the entry is written without its error fields.
+- A value that contains itself is cut with `"[cycle: max depth exceeded]"`
+  where it first repeats and, in a payload or extra, reported to `WithOnError`
+  (in an `IntegrationInfo` body it is only cut). A cyclic payload used
+  to be walked to the depth limit, which takes exponentially long when it
+  branches back into itself, and a cyclic extra reduced the line to the minimal
+  record. In extras and `IntegrationInfo` bodies this covers cycles through
+  `map[string]any` / `[]any` values and through structs with `mask` tags; a
+  cycle through struct types without `mask` tags still fails there as before
+  (the minimal record, or `[unserializable: …]` in a body). Extras now share the payload's depth limit: `map[string]any` / `[]any`
+  nesting beyond 64 levels is cut with `"[max depth exceeded]"` instead of being
+  rendered in full.
+- `MaskJSON` no longer overflows the stack on a map or slice that contains
+  itself; it is cut with the cycle marker, and nesting beyond 10000 levels with
+  `"[max depth exceeded]"`.
+- slog: a group named like a map-valued attribute no longer writes into the
+  caller's map, which crashed concurrent logging.
+- A nil pointer `TextMarshaler` map key no longer panics; it renders as `""`.
+- Payloads, `IntegrationInfo` bodies and HTTP bodies re-encoded for masking or
+  `LogExtraFields` no longer HTML-escape `<`, `>` and `&`; they are written
+  literally, like the rest of the log line.
+- Payloads honour `json:",string"` and `encoding/json`'s embedded-field
+  dominance rules (a tagged field beats an untagged one at the same depth).
+- httpclient: no longer blocks on a `101 Switching Protocols` response (the
+  body stays the upgraded `io.ReadWriteCloser`) or on a streaming body (SSE,
+  gRPC, Connect streaming, `stream=watch`). Both packages log
+  `[body not logged: streaming]`, and the middleware records 101 as the final
+  status.
+- middleware: a panicking handler is logged as a 500 with `panic: …` in the
+  error fields, then re-panics with the same value.
+- middleware, httpclient: a body re-encoded for masking or `LogExtraFields`
+  keeps its numbers exact (`12345678901234567891`, `0.1000`); they used to go
+  through `float64`.
+- httpclient: an empty request body is no longer sent chunked.
+- middleware: excluded paths get the correlation ID, workflow IDs and client IP
+  in their context, as documented. httpclient: requests filtered out by
+  `ExcludeURLs` / `IncludeURLs` still carry `X-Correlation-ID`.
+- middleware: `Flush` commits the 200 status in the log, as it does on the
+  wire; `bytes_in` of a chunked body counts the bytes actually read instead of
+  the captured prefix.
+
+### Documentation
+
+- A new README section, "What is masked and what is not", sets out the limits
+  of masking: which parts of a record `mask` tags and name-based strategies
+  reach, that field names match exactly apart from case (`access_token` does
+  not cover `accessToken`), that `message`, `error_message` and `stack_trace`
+  are never masked, and how non-JSON, compressed and unparseable form bodies
+  are logged.
+- Distributed tracing: the README now states that behind the HTTP middleware
+  the correlation ID outranks a `TraceExtractor`, so request records pair a
+  correlation-ID `trace_id` with the OpenTelemetry `span_id`. It shows a small
+  handler that passes the OpenTelemetry trace ID to the middleware as the
+  correlation ID, which makes the two agree.
+- The README and the package documentation no longer claim that payloads render
+  exactly as `encoding/json` would: payload keys are written sorted, so struct
+  fields do not keep their declaration order. The other `encoding/json` rules
+  (`json` names, `json:"-"`, `omitempty`, embedded structs) still apply.
+- The `CreditCard` row of the masking-strategy table showed the grouped output
+  of a 16-digit card number against the table's 11-digit example input, which
+  `CreditCard` actually hides entirely. The row now shows `********`, and the
+  grouped form has its own example.
+- The field reference marks `event` as optional: it is omitted when empty, for
+  instance on a `slog` record without an `event` attribute.
+- The `hideall` note in the README and the `MaskingStrategy` doc comment no
+  longer say the output never reveals a secret's length: the eight-asterisk cap
+  only hides the length of longer values.
+- The package documentation mentions the `log/slog` adapter.
+- `SlogOptions.AddSource` no longer claims the `slog.Logger` must be created
+  with `AddSource`: `slog.Logger` always records the program counter the source
+  is taken from.
+- The `CreditCard` doc comment gave `510152 ****** 4582` as the output for
+  `5101521234564582`; it is `5101 52 **** ** 4582`.
+- The Go Report Card badge is gone from the README; the service shut down on
+  1 July 2026. The CI status badge stays.
+- `CONTRIBUTING.md` pins the golangci-lint version CI uses and describes the
+  fuzz, govulncheck, API-compatibility and release steps.
+
+### Infrastructure
+
+Nothing in this section changes the module contents or the exported API.
+
+- Actions moved to their current major versions and are pinned to full commit
+  SHAs, with the release in a trailing comment: `actions/checkout` v7.0.1,
+  `actions/setup-go` v7.0.0, `golangci/golangci-lint-action` v9.3.0 and
+  `actions/upload-artifact` v7.0.1. All of them run on Node 24, which clears
+  the Node 20 deprecation warnings. Every checkout sets
+  `persist-credentials: false`.
+- golangci-lint v2.14.0. The configuration adds the checks Go Report Card used
+  to run: `misspell`, `revive` (golint's successor; its default rules except
+  `unused-parameter`), `gocyclo` (above 30) and the `gofmt` formatter, which
+  runs as `gofmt -s` and replaces the separate gofmt step. Findings are no
+  longer capped per linter.
+- The test matrix covers Go 1.23 (the `go.mod` minimum), `oldstable` and
+  `stable`. `setup-go` caching is off: without a `go.sum` there is nothing to
+  cache, and it only produced a warning.
+- `govulncheck` runs at a pinned version (v1.8.0) instead of `@latest`.
+- A fuzz job runs every `Fuzz*` target in every package for 20 seconds and
+  uploads the failing inputs as an artifact.
+- An API-compatibility job runs `gorelease` against the latest release tag and
+  fails on an incompatible change to the exported API.
+- A release workflow: pushing a `v*` tag publishes a GitHub Release whose notes
+  are the matching `CHANGELOG.md` section, and fails when there is none. It can
+  also be started by hand for an existing tag.
+- Dependabot opens a weekly, grouped pull request for GitHub Actions updates.
+  There is no `gomod` entry, since the module has no dependencies.
+- Workflows default to `contents: read`; only the release job gets
+  `contents: write`.
+
 ## [1.1.0] - 2026-08-25
 
 ### Changed
@@ -71,8 +240,13 @@ and this project adheres to
   the toolchain: Go 1.27 resolves `MarshalText` before the string kind, earlier
   versions resolve the string kind first. Rendering stays identical to
   `encoding/json` on every supported Go version.
-- CI: golangci-lint v2.13.1, the first release that analyses Go 1.27 packages
-  without crashing.
+
+### Infrastructure
+
+Nothing in this section changes the module contents or the exported API.
+
+- golangci-lint v2.13.1 in CI, the first release that analyses Go 1.27
+  packages without crashing.
 
 ## [1.0.0] - 2026-08-14
 
@@ -365,7 +539,8 @@ First public release.
   dumps.
 - Kubernetes pod metadata support, either static or from the environment.
 
-[Unreleased]: https://github.com/mustafakarakulak/gophlog/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/mustafakarakulak/gophlog/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/mustafakarakulak/gophlog/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/mustafakarakulak/gophlog/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/mustafakarakulak/gophlog/compare/v0.0.3...v1.0.0
 [0.0.3]: https://github.com/mustafakarakulak/gophlog/compare/v0.0.2...v0.0.3
